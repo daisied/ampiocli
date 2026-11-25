@@ -1,0 +1,4 @@
+[
+  {"id": "t1", "type": "tab", "label": "Lights"},
+  {"id": "n1", "type": "inject", "z": "t1", "name": "tick"}
+]
