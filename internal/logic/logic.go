@@ -16,11 +16,10 @@
 // Writes go over MQTT, as Designer sends them:
 //
 //	publish base64(bytes) to device_api/to/<mac>/conditions_wr
+//	progress {"p": percent, "s": status} on device_api/from/<MAC>/status/conditions_wr/0
 //	the same for linked_conditions_wr when the rules use linked conditions
 //
-// The M-SERV sends no answer to either (Designer doesn't wait for one), so
-// ampiocli reads the module list until it reports the new bytes. On the
-// installation it was built on, that took about a minute for 583 bytes.
+// The answer has the mac in upper case and the bus group (0) at the end.
 package logic
 
 import (
@@ -29,7 +28,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -50,11 +48,10 @@ type Domain struct {
 	designer string            // Designer's address, where the codec comes from
 	codec    *designer.Codec   // loaded on first pull
 	devices  map[string]device // by mac, as last pulled
-	out      io.Writer         // progress while a module write settles
 }
 
-func New(conn *mserv.Conn, designerURL string, out io.Writer) *Domain {
-	return &Domain{conn: conn, designer: designerURL, out: out}
+func New(conn *mserv.Conn, designerURL string) *Domain {
+	return &Domain{conn: conn, designer: designerURL}
 }
 
 func (*Domain) Name() string { return "logic" }
@@ -205,8 +202,7 @@ func (d *Domain) encode(dev device, rules any) (write, error) {
 	if err != nil {
 		return write{}, err
 	}
-	// A module stores its rules without the 255 end mark the encoder appends.
-	if !bytes.Equal(again, append(bytes.Clone(dev.Conditions), 255)) {
+	if !sameTable(dev.Conditions, again) {
 		return write{}, fmt.Errorf("Designer %s's codec does not reproduce this module's current bytes; not writing it", d.codec.Version)
 	}
 
@@ -239,37 +235,27 @@ func (d *Domain) encode(dev device, rules any) (write, error) {
 	return write{dev, conditions, linked}, nil
 }
 
-// send writes one table to a module, then reads the module list until the
-// M-SERV reports the new bytes.
+// send writes one table to a module and waits for it to confirm.
 func (d *Domain) send(ctx context.Context, dev device, command string, data []byte) error {
 	topic := fmt.Sprintf("device_api/to/%s/%s", dev.mac(), command)
-	if err := d.conn.Publish(topic, base64.StdEncoding.EncodeToString(data)); err != nil {
-		return err
-	}
-	// A module stores a table without the 255 end mark the encoder appends.
-	want := bytes.TrimSuffix(data, []byte{255})
-	timeout := 2*time.Minute + time.Duration(len(data))*200*time.Millisecond
-	fmt.Fprintf(d.out, "logic: %s sent to module %s (%d bytes), waiting for the module list to show it (about a minute)\n", command, dev.mac(), len(data))
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	for {
-		_, devices, err := d.list(ctx)
-		if err != nil {
-			return err
+	status := fmt.Sprintf("device_api/from/%s/status/%s/#", strings.ToUpper(dev.mac()), command)
+	payload := []byte(base64.StdEncoding.EncodeToString(data))
+	return d.conn.Call(ctx, topic, payload, status, time.Minute, func(reply []byte) (bool, error) {
+		var s struct{ P, S int }
+		if err := json.Unmarshal(reply, &s); err != nil {
+			return false, fmt.Errorf("module %s: unreadable status %q", dev.mac(), reply)
 		}
-		for _, now := range devices {
-			got := now.Conditions
-			if command == "linked_conditions_wr" {
-				got = now.LinkedConditions
-			}
-			if now.MacProd == dev.MacProd && bytes.Equal(got, want) {
-				return nil
-			}
+		if s.S < 0 {
+			return false, fmt.Errorf("module %s refused %s (status %d)", dev.mac(), command, s.S)
 		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("module %s: %s sent, but the module list still shows the old bytes after %s", dev.mac(), command, timeout)
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return s.P >= 100 && s.S == 0, nil
+	})
+}
+
+// sameTable says whether a table in the module list holds encoded, the
+// encoder's output, which ends with a 255 end mark. The list shows a table
+// as last written, end mark included, or as read from the module, without it.
+// The codec reads both alike.
+func sameTable(listed, encoded []byte) bool {
+	return bytes.Equal(listed, encoded) || bytes.Equal(listed, bytes.TrimSuffix(encoded, []byte{255}))
 }

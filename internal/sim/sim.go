@@ -8,7 +8,6 @@
 package sim
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -199,8 +198,9 @@ func (s *Sim) listDevices(string, []byte) {
 	s.publishJSON("device_api/from/list", map[string]any{"devices": s.devices})
 }
 
-// writeModule takes device_api/to/<mac>/<command> with base64 bytes. A module
-// stores its rules without the 255 end mark the encoder appends.
+// writeModule takes device_api/to/<mac>/<command> with base64 bytes. Like the
+// real M-SERV, the module list then shows the bytes as sent, end mark
+// included, though reading the module itself gives them without it.
 func (s *Sim) writeModule(topic string, payload []byte) {
 	parts := strings.Split(topic, "/")
 	mac, command := parts[2], parts[3]
@@ -213,12 +213,14 @@ func (s *Sim) writeModule(topic string, payload []byte) {
 	for _, d := range s.devices {
 		row, _ := d.(map[string]any)
 		if n, _ := row["macProd"].(json.Number).Int64(); strconv.FormatInt(n, 16) == mac {
-			row[field] = base64.StdEncoding.EncodeToString(bytes.TrimSuffix(data, []byte{255}))
+			row[field] = base64.StdEncoding.EncodeToString(data)
 			fmt.Fprintf(s.log, "module %s: wrote %s (%d bytes)\n", mac, field, len(data))
 		}
 	}
 	s.mu.Unlock()
-	// Like the real M-SERV, no answer.
+	status := fmt.Sprintf("device_api/from/%s/status/%s/0", strings.ToUpper(mac), command)
+	s.publishJSON(status, map[string]int{"p": 50, "s": 1})
+	s.publishJSON(status, map[string]int{"p": 100, "s": 0})
 }
 
 func (s *Sim) getFlows(w http.ResponseWriter, _ *http.Request) {

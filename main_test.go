@@ -4,7 +4,7 @@ package main
 // testdata/house, and a miniature Designer bundle (testdata/designer) with the
 // same shapes as the real one. Its toy codec stores a rule {"value": n} as
 // the byte n and refuses values over 200; a rule {"value": n, "link": l} is
-// the bytes 201, n, with l in the module's linked table.
+// the bytes 201, n, with l in the module's linked table. 255 ends the table.
 
 import (
 	"encoding/json"
