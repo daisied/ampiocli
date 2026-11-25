@@ -10,7 +10,7 @@ description: Change an Ampio smart-home installation (M-SERV app configuration, 
 ## Setup (once)
 
 ```
-GOPRIVATE=github.com/daisied go install github.com/daisied/ampiocli@latest
+go install github.com/daisied/ampiocli@latest
 ```
 
 The working copy is a folder with a `.env` holding `AMPIO_HOST` and `AMPIO_PASSWORD`. If there is none, ask the person for the M-SERV address and admin password, and write them into `.env` yourself. Never print the password or commit `.env`.

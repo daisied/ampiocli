@@ -183,7 +183,7 @@ Save codes in Designer's save order: groups 2, group_objects 7, resources 4, con
 One static binary with no runtime dependencies. Building it needs Go 1.26 or newer:
 
 ```
-GOPRIVATE=github.com/daisied go install github.com/daisied/ampiocli@latest
+go install github.com/daisied/ampiocli@latest
 ```
 
 Put the M-SERV's address and admin password in `.env` in the working-copy folder (see `.env.example`):
