@@ -39,24 +39,29 @@ type table struct {
 	// code is the number in the save-status topic; 0 means ampiocli only reads the table.
 	code int
 	// removable tables are saved on the "<table>_nc" topic, which also takes
-	// {"idToRemove": id}. The others cannot delete rows: Designer hides a
-	// deleted object or group by setting the DELETED bit (16) in its params.
+	// {"idToRemove": id}. The others cannot delete rows.
 	removable bool
+	// hideable tables stand in for a delete as Designer does: they set the
+	// DELETED bit in the row's params.
+	hideable bool
 }
+
+// deleted is the DELETED bit in an object's or group's params.
+const deleted = 16
 
 // tables in Designer's save order. users, users_tokens and roles hold logins
 // and are left out on purpose.
 var tables = []table{
-	{"groups", 2, false},
-	{"group_objects", 7, true},
-	{"resources", 4, false},
-	{"connected_objects", 1, true},
-	{"locations", 8, true},
-	{"objects", 6, false},
-	{"flag_conditions", 10, false},
-	{"data", 9, false},
-	{"conditions", 0, false},
-	{"scenes", 0, false},
+	{"groups", 2, false, true},
+	{"group_objects", 7, true, false},
+	{"resources", 4, false, false},
+	{"connected_objects", 1, true, false},
+	{"locations", 8, true, false},
+	{"objects", 6, false, true},
+	{"flag_conditions", 10, false, false},
+	{"data", 9, false, false},
+	{"conditions", 0, false, false},
+	{"scenes", 0, false, false},
 }
 
 var (
@@ -80,16 +85,36 @@ func (d *Domain) Pull(ctx context.Context) (workdir.Files, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", t.name, err)
 		}
-		var reply struct{ List json.RawMessage }
-		if err := json.Unmarshal(raw, &reply); err != nil {
+		list, err := rows(raw)
+		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", t.name, err)
 		}
-		if string(reply.List) == "null" || len(reply.List) == 0 {
-			reply.List = json.RawMessage("[]")
-		}
-		files["config/"+t.name+".json"] = reply.List
+		files["config/"+t.name+".json"] = list
 	}
 	return files, nil
+}
+
+// rows takes the rows out of a table read's reply, {"List":[rows]}. An empty
+// table may come back without rows; any other reply is an error, so that an
+// odd answer never reads as a table that has emptied.
+func rows(reply []byte) (json.RawMessage, error) {
+	var r map[string]json.RawMessage
+	if err := json.Unmarshal(reply, &r); err != nil {
+		return nil, err
+	}
+	list, ok := r["List"]
+	switch {
+	case !ok && len(r) == 0, ok && string(list) == "null":
+		return json.RawMessage("[]"), nil
+	case !ok:
+		return nil, fmt.Errorf("unexpected reply %.200s", reply)
+	}
+	if v, err := items.Decode(list); err != nil {
+		return nil, err
+	} else if _, isList := v.([]any); !isList {
+		return nil, fmt.Errorf("unexpected reply %.200s", reply)
+	}
+	return list, nil
 }
 
 func (*Domain) Items(files workdir.Files) (items.Items, error) {
@@ -146,30 +171,40 @@ func (d *Domain) Prepare(changes []items.Change, live items.Items, work workdir.
 	if err != nil {
 		return nil, err
 	}
-	saves := map[string][]any{} // table → rows and removals to send
+	saves := map[string][]any{}  // table → rows and removals to send
+	hidden := map[string][]any{} // table → rows deleted from the files, kept with the DELETED bit
 	plan := &engine.Plan{}
 	for _, c := range changes {
 		t, _ := split(c.Key)
 		if t.code == 0 {
 			return nil, fmt.Errorf("%s: ampiocli does not write table %s", c.Key, t.name)
 		}
-		if c.Removed {
-			if !t.removable {
-				return nil, fmt.Errorf("%s: rows in %s cannot be deleted; set the DELETED bit (16) in params instead, as Designer does", c.Key, t.name)
-			}
+		var row map[string]any
+		switch {
+		case c.Removed && t.removable:
 			saves[t.name] = append(saves[t.name], map[string]any{"idToRemove": c.Before.(map[string]any)["id"]})
 			plan.Expect = append(plan.Expect, c)
 			continue
-		}
-		row := maps.Clone(c.After.(map[string]any))
-		if _, err := resolve(row, ids); err != nil {
-			return nil, fmt.Errorf("%s: %w", c.Key, err)
+		case c.Removed && !t.hideable:
+			return nil, fmt.Errorf("%s: rows in %s cannot be deleted", c.Key, t.name)
+		case c.Removed:
+			// The M-SERV has no delete for objects and groups; Designer hides them.
+			if row, err = hide(c.Before.(map[string]any)); err != nil {
+				return nil, fmt.Errorf("%s: %w", c.Key, err)
+			}
+			hidden[t.name] = append(hidden[t.name], maps.Clone(row))
+			plan.Notes = append(plan.Notes, fmt.Sprintf("%s cannot be deleted; hiding it with the DELETED bit (%d) in params, as Designer does", c.Key, deleted))
+		default:
+			row = maps.Clone(c.After.(map[string]any))
+			if _, err := resolve(row, ids); err != nil {
+				return nil, fmt.Errorf("%s: %w", c.Key, err)
+			}
 		}
 		id, _ := row["id"].(json.Number)
 		if _, err := strconv.Atoi(string(id)); err != nil {
 			return nil, fmt.Errorf("%s: a row's id must be a whole number, or for a new row a placeholder like \"@hall_light\"", c.Key)
 		}
-		plan.Expect = append(plan.Expect, items.Change{Key: key(t.name, id), After: maps.Clone(row)})
+		plan.Expect = append(plan.Expect, items.Change{Key: key(t.name, id), After: maps.Clone(row), Added: c.Added})
 		if c.Added {
 			row["modifiedOrNew"] = 1 // Designer's marks for new and changed rows
 		} else {
@@ -178,8 +213,8 @@ func (d *Domain) Prepare(changes []items.Change, live items.Items, work workdir.
 		saves[t.name] = append(saves[t.name], row)
 	}
 
-	if len(ids) > 0 {
-		if plan.Work, err = resolveFiles(work, ids); err != nil {
+	if len(ids) > 0 || len(hidden) > 0 {
+		if plan.Work, err = rewrite(work, ids, hidden); err != nil {
 			return nil, err
 		}
 	}
@@ -193,8 +228,20 @@ func (d *Domain) Prepare(changes []items.Change, live items.Items, work workdir.
 		}
 		return nil
 	}
-	plan.After = func(context.Context) error { return d.conn.Publish("ampio/control/admin/data", "refresh") }
+	plan.After = func(ctx context.Context) error { return d.conn.Publish(ctx, "ampio/control/admin/data", "refresh") }
 	return plan, nil
+}
+
+// hide returns row with the DELETED bit set in its params.
+func hide(row map[string]any) (map[string]any, error) {
+	params, _ := row["params"].(json.Number)
+	n, err := strconv.ParseInt(string(params), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("cannot be deleted, and has no whole-number params to hide it with")
+	}
+	row = maps.Clone(row)
+	row["params"] = json.Number(strconv.FormatInt(n|deleted, 10))
+	return row, nil
 }
 
 // assignIDs numbers the new rows that have a placeholder id in the order
@@ -261,17 +308,29 @@ func resolve(row map[string]any, ids map[string]json.Number) (bool, error) {
 	return found, nil
 }
 
-// resolveFiles returns the working copy with its placeholders resolved.
-func resolveFiles(work workdir.Files, ids map[string]json.Number) (workdir.Files, error) {
+// rewrite returns the working copy as it reads once the push is written:
+// placeholders resolved, and hidden rows back in their tables. The engine
+// saves it before writing, so a retried push finds these edits done.
+func rewrite(work workdir.Files, ids map[string]json.Number, hidden map[string][]any) (workdir.Files, error) {
 	out := workdir.Files{}
 	for path, raw := range work {
 		out[path] = raw
-		v, err := items.Decode(raw)
-		if err != nil {
-			return nil, err
+	}
+	for _, t := range tables {
+		path := "config/" + t.name + ".json"
+		raw, ok := out[path]
+		if !ok && len(hidden[t.name]) == 0 {
+			continue
 		}
-		rows, _ := v.([]any)
-		changed := false
+		var rows []any
+		if ok {
+			v, err := items.Decode(raw)
+			if err != nil {
+				return nil, err
+			}
+			rows, _ = v.([]any)
+		}
+		changed := len(hidden[t.name]) > 0
 		for _, r := range rows {
 			found, err := resolve(r.(map[string]any), ids)
 			if err != nil {
@@ -280,7 +339,8 @@ func resolveFiles(work workdir.Files, ids map[string]json.Number) (workdir.Files
 			changed = changed || found
 		}
 		if changed {
-			if out[path], err = json.Marshal(rows); err != nil {
+			var err error
+			if out[path], err = json.Marshal(append(rows, hidden[t.name]...)); err != nil {
 				return nil, err
 			}
 		}

@@ -9,7 +9,7 @@ Change an Ampio installation without opening Designer. ampiocli reads the M-SERV
 - **Edit Node-RED.** Change flows or add new ones.
 - **Search the whole house.** Find every rule and flow that uses flag 12, or every object in the kitchen, with one grep.
 - **Make bulk changes.** Rename 40 objects to English, or give each bedroom the same tiles, in one edit.
-- **Keep a history.** Commit the folder to git after each pull and you have a record of every change, including the ones made in Designer.
+- **Keep a history.** Commit the folder to git after each pull and you have a record of every change, including the ones made in Designer. `pull` writes a `.gitignore` that keeps the password (`.env`) and ampiocli's own bookkeeping out of it.
 
 You see every change before it's written, a backup is taken first, and each write is read back and checked. Scripts and coding agents can use it the same way, and `SKILL.md` tells an agent how.
 
@@ -29,10 +29,10 @@ nodered: 10 files
 
 $ ampiocli diff
 config: 1 changed
-  ~ config/objects/6  "KITCHEN"
-      opis_menu: "KITCHEN" → "Kitchen ceiling"
+  ~ config/objects/6  "HALL"
+      opis_menu: "HALL" → "Hall ceiling"
 logic: 1 changed
-  ~ logic/21dc1  "Rolety"
+  ~ logic/1a2b3  "Blinds"
       rules[0].disabled: false → true
 
 $ ampiocli push            # every check against the live M-SERV; writes nothing
@@ -67,15 +67,18 @@ flowchart LR
 
 ```
 config/objects.json       one file per table, rows as the M-SERV stores them
-logic/21dc1.json          one module's rules, decoded: {"name", "protocol", "rules"}
-nodered/recuperator.json  one Node-RED tab: the tab node, then its nodes
+logic/1a2b3.json          one module's rules, decoded: {"name", "protocol", "rules"}
+nodered/ventilation.json  one Node-RED tab: the tab node, then its nodes
 devices.json              the module list (reference only)
 blobs/<hash>.b64          long base64 values such as icons, referenced as "blob:<hash>"
 .ampiocli/base/           the files as last pulled
 .ampiocli/backups/        the M-SERV's state just before each push
+.gitignore                keeps .env and .ampiocli/ out of git
 ```
 
-The base is the M-SERV as it was at the last pull, so `diff` works offline. Every file is split into items: a table row (`config/objects/6`), a module's logic (`logic/21dc1`) or a Node-RED node. Diffs, conflict checks and verification all work on items, so the three domains share that code.
+The base is the M-SERV as it was at the last pull, so `diff` works offline. Every file is split into items: a table row (`config/objects/6`), a module's logic (`logic/1a2b3`) or a Node-RED node. Diffs, conflict checks and verification all work on items, so the three domains share that code.
+
+Deleting a row from `objects.json` or `groups.json` hides it instead, because the M-SERV has no delete for them: push sets the DELETED bit (16) in its `params`, as Designer does, and the row comes back in the file with that bit set.
 
 A new config row gets a placeholder id such as `"@hall_light"`. Push gives it the table's next free id. Any other row that refers to the placeholder in an id column (`id_obiektu`, `id_grupy`, `lokalizacja`, ...) gets the same id. That way a new object and its group membership can go in one push.
 
@@ -92,15 +95,16 @@ sequenceDiagram
     Note over cli: validate, assign ids, encode logic,<br/>run the codec checks
   end
   Note over cli: without --yes, stop here
-  Note over cli: back up the live state
+  Note over cli: back up the live state of every domain
   loop config, logic, Node-RED
+    cli->>m: read again: still as checked?
     cli->>m: write, as Designer does
     cli->>m: read back
     Note over cli: every change must read back as written
   end
 ```
 
-Every domain is checked before the first write, so a bad edit stops the push with nothing written. If a write fails part-way, new rows already have their final ids in the working copy. Running `push --yes` again skips what the M-SERV already has and writes the rest once. `ampiocli restore <backup>` puts a backup into the working copy, and the next push writes it back.
+Every domain is checked before the first write, so a bad edit stops the push with nothing written. Just before each domain's write, its live state is read again, so a change made on the M-SERV during the push stops that write. If a write fails part-way, new rows already have their final ids in the working copy. Running `push --yes` again skips what the M-SERV already has and writes the rest once. `ampiocli restore <backup>` puts a backup into the working copy, and the next push writes it back. It refuses to overwrite unpushed edits unless given `--force`.
 
 ## Module logic: Designer's own codec
 
@@ -128,32 +132,34 @@ save(mac, rules) {
 
 Three more patterns find the registry's start-up, the codec's start-up and device registration. Each pattern must match exactly once. Otherwise ampiocli stops with "Designer changed" instead of guessing.
 
-From those names it keeps every top-level declaration they reach, following imports into other chunks, the way a linker keeps only the functions a program calls. Top-level statements that modify something kept, such as a library's set-up, are kept too. Rendering and event wiring are left out. The result runs in goja with no network or file access. Designer is cached per M-SERV and never stored in this repository, so after an Ampio update the next run uses the new codec.
+From those names it keeps every top-level declaration they reach, following imports into other chunks, the way a linker keeps only the functions a program calls. Top-level statements that modify something kept, such as a library's set-up, are kept too. Rendering and event wiring are left out. The result runs in goja with no network or file access, and with a time limit: a minute to start, 10 seconds per module. Designer is cached per M-SERV and never stored in this repository, so after an Ampio update the next run uses the new codec.
 
 Before writing a module, ampiocli refuses unless two checks pass:
 
-1. **Self-test.** Decode the module's current bytes and encode them again. The result must equal the stored bytes exactly, which proves the codec handles this module.
+1. **Self-test.** Decode the module's current bytes and encode them again. The conditions must equal the stored bytes exactly, which proves the codec handles this module. The encoder rebuilds the linked table from the rules, so it may drop entries no rule uses, and only those: the conditions must decode the same with the rebuilt table.
 2. **Round trip.** The new bytes must decode back to exactly the edited rules. A field the module can't store is reported by name:
 
 ```
-logic/21dc1: the edited rules do not survive encoding (unknown field or value out of range; copy an existing rule and change it):
+logic/1a2b3: the edited rules do not survive encoding (unknown field or value out of range; copy an existing rule and change it):
   rules[0].action.params.val: 999 → (none)
 ```
 
-On the installation it was built on, all 8 programmed modules re-encode byte for byte. Loading the codec takes about 1.5 s.
+On the installation it was built on, all 8 programmed modules pass both checks, and their conditions re-encode byte for byte. One module carries linked entries no rule uses; push says so. Loading the codec takes about 1.5 s.
 
 ## Safety
 
 | Risk | Guard |
 |---|---|
-| Someone changed the same thing in Designer since your pull | Per-item conflict check. Node-RED deploys also name the revision, so Node-RED refuses if someone deployed in between. |
+| Someone changed the same thing in Designer since your pull | Per-item conflict check, run again just before each domain is written. Node-RED deploys also name the revision, so Node-RED refuses if someone deployed in between. |
+| Someone added a row while you push | A new row's id must still be free just before the write. |
 | A bad edit gets half-written | Every domain is validated and encoded before the first write. |
 | A push stops part-way | The next push skips what was written. Nothing is written twice. |
 | The codec misreads a module, or can't store an edit | The self-test and the round trip above. |
 | Rules too big for the module | Checked against the module's `conditionsMemSize`. |
 | A write is acknowledged but not applied | Every change is read back and compared. |
-| Undo | A backup before every push, and `restore`. |
-| Logins | The `users`, `users_tokens` and `roles` tables are never read, and neither are Node-RED credentials. |
+| Undo | A backup of every domain before every push, and `restore`. New objects and groups are hidden rather than deleted. |
+| Logins | The `users`, `users_tokens` and `roles` tables are never read, and neither are Node-RED credentials. `pull` keeps `.env` out of git. |
+| Designer's code hangs | It runs with a time limit, and the first Ctrl-C stops a push cleanly; a second one quits. |
 
 ## Protocol reference
 
@@ -171,13 +177,13 @@ Save codes in Designer's save order: groups 2, group_objects 7, resources 4, con
 
 ## Limits
 
-- Objects and groups can't be deleted; the M-SERV has no delete for them. Designer hides them by setting bit 16 in `params`, and so does ampiocli.
+- Objects and groups can't be deleted; the M-SERV has no delete for them. Deleting one from its file hides it, as Designer does. Rows in `resources`, `flag_conditions` and `data` can't be deleted at all.
 - Rule descriptions in the `data` table are keyed by the rule's hash. Changing a rule's trigger or action detaches its description, as it does in Designer.
-- Modules from protocol 25 on use a newer logic format and are left out.
+- Modules from protocol 25 on use a newer logic format and are left out. So is any module Designer's codec fails to decode; pull names it.
 - Scenes and app automations (`scenes`, `conditions`) are read but not written.
 - **Tested:**
   - Reading everything live, and every check up to the write, against the live M-SERV.
-  - Full writes against the simulator, including a replay of the Recuperator job on a simulator seeded with the backup taken before it. The replay covered 4 groups, 17 objects, 17 group memberships, a new Node-RED tab and 2 disabled nodes. The result matched the real installation exactly, ids included.
+  - Full writes against the simulator, including a replay of a real ventilation job on a simulator seeded with the backup taken before it. The replay covered 4 groups, 17 objects, 17 group memberships, a new Node-RED tab and 2 disabled nodes. The result matched the real installation exactly, ids included.
   - Writes on the real M-SERV, each undone with `restore`: renaming a group, changing a module rule and adding a Node-RED node. A module write is confirmed in about 1.5 s, and a whole push takes 3 to 4 s.
 
 ## Setup and development
@@ -195,7 +201,13 @@ AMPIO_HOST=192.168.1.10
 AMPIO_PASSWORD=...
 ```
 
-`go test ./...` runs the real CLI against `internal/sim`, an in-memory stand-in M-SERV with the same topics and replies, and against a miniature Designer bundle in `testdata/designer` that has the same shapes as the real one. `ampiocli sim` serves your last pull the same way, so a push can be tried on a copy of the house first.
+`go test ./...` runs the real CLI against `internal/sim`, an in-memory stand-in M-SERV with the same topics and replies, and against a miniature Designer bundle in `testdata/designer` that has the same shapes as the real one. CI runs it with the race detector and `govulncheck` on every push. `ampiocli sim` serves your last pull the same way, so a push can be tried on a copy of the house first.
+
+With a real installation's pull at hand, one more test runs every module through the real Designer codec, offline:
+
+```
+AMPIOCLI_REAL=path/to/working-copy AMPIOCLI_REAL_DESIGNER=~/.cache/ampiocli/designer/<host> go test ./internal/logic -run Real -v
+```
 
 | Package | Role |
 |---|---|
@@ -208,3 +220,5 @@ AMPIO_PASSWORD=...
 | `internal/sim` | the stand-in M-SERV |
 
 `SKILL.md` teaches coding agents to use the tool safely.
+
+MIT licensed; see `LICENSE`.

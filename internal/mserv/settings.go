@@ -78,10 +78,19 @@ func loadEnvFile(path string) error {
 			continue
 		}
 		key = strings.TrimSpace(strings.TrimPrefix(key, "export "))
-		val = strings.Trim(strings.TrimSpace(val), `"'`)
+		val = unquote(strings.TrimSpace(val))
 		if _, set := os.LookupEnv(key); !set {
 			os.Setenv(key, val)
 		}
 	}
 	return sc.Err()
+}
+
+// unquote removes one pair of matching quotes around a value, and nothing
+// else: a password may end in a quote character.
+func unquote(v string) string {
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		return v[1 : len(v)-1]
+	}
+	return v
 }

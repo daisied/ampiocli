@@ -14,8 +14,16 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"time"
 
 	"github.com/dop251/goja"
+)
+
+// Limits on Designer's code, which comes from the M-SERV: starting the codec
+// runs the sliced program once (about 1.5 s); a call handles one module.
+var (
+	startLimit = time.Minute
+	callLimit  = 10 * time.Second
 )
 
 //go:embed runtime.js
@@ -60,7 +68,18 @@ func Open(designerURL string, devices json.RawMessage) (*Codec, error) {
 	return c, nil
 }
 
+// limit interrupts the code running in the codec's interpreter after d. The
+// returned function ends the limit.
+func (c *Codec) limit(d time.Duration) func() {
+	t := time.AfterFunc(d, func() { c.vm.Interrupt(fmt.Sprintf("Designer's code still running after %s", d)) })
+	return func() {
+		t.Stop()
+		c.vm.ClearInterrupt()
+	}
+}
+
 func (c *Codec) start(js string, devices json.RawMessage) error {
+	defer c.limit(startLimit)()
 	if _, err := c.vm.RunString(runtimeJS); err != nil {
 		return err
 	}
@@ -68,20 +87,26 @@ func (c *Codec) start(js string, devices json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	run, _ := goja.AssertFunction(fn)
+	run, ok := goja.AssertFunction(fn)
+	if !ok {
+		return errors.New("the codec program is not a function")
+	}
 	result, err := run(goja.Undefined())
 	if err != nil {
 		return err
 	}
 	// goja runs the program's awaits before the call returns.
-	promise := result.Export().(*goja.Promise)
+	promise, ok := result.Export().(*goja.Promise)
+	if !ok {
+		return errors.New("the codec program did not return a promise")
+	}
 	switch promise.State() {
 	case goja.PromiseStatePending:
 		return errors.New("its start-up never finished (an import cycle?)")
 	case goja.PromiseStateRejected:
 		return fmt.Errorf("%v", promise.Result())
 	}
-	wrap, _ := goja.AssertFunction(c.vm.Get("codec"))
+	wrap, _ := goja.AssertFunction(c.vm.Get("codec")) // defined by runtime.js
 	api, err := wrap(goja.Undefined(), promise.Result(), c.vm.ToValue(string(devices)))
 	if err != nil {
 		return err
@@ -95,6 +120,7 @@ func (c *Codec) start(js string, devices json.RawMessage) error {
 // Decode turns a module's condition and linked-condition tables into rules.
 // mac is Designer's "0_<hex>" form.
 func (c *Codec) Decode(mac string, conditions, linked []byte) (json.RawMessage, error) {
+	defer c.limit(callLimit)()
 	v, err := c.decode(goja.Undefined(), c.vm.ToValue(mac),
 		c.vm.ToValue(c.vm.NewArrayBuffer(conditions)), c.vm.ToValue(c.vm.NewArrayBuffer(linked)))
 	if err != nil {
@@ -106,6 +132,7 @@ func (c *Codec) Decode(mac string, conditions, linked []byte) (json.RawMessage, 
 // Encode turns rules into the condition and linked-condition tables Designer
 // would write to the module.
 func (c *Codec) Encode(mac string, rules json.RawMessage) (conditions, linked []byte, err error) {
+	defer c.limit(callLimit)()
 	v, err := c.encode(goja.Undefined(), c.vm.ToValue(mac), c.vm.ToValue(string(rules)))
 	if err != nil {
 		return nil, nil, err
@@ -114,5 +141,10 @@ func (c *Codec) Encode(mac string, rules json.RawMessage) (conditions, linked []
 	if !ok || len(out) != 2 {
 		return nil, nil, errors.New("codec returned an unexpected value")
 	}
-	return out[0].(goja.ArrayBuffer).Bytes(), out[1].(goja.ArrayBuffer).Bytes(), nil
+	cond, ok1 := out[0].(goja.ArrayBuffer)
+	link, ok2 := out[1].(goja.ArrayBuffer)
+	if !ok1 || !ok2 {
+		return nil, nil, errors.New("codec returned an unexpected value")
+	}
+	return cond.Bytes(), link.Bytes(), nil
 }

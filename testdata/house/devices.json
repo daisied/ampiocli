@@ -1,4 +1,5 @@
 [
   {"macProd": 266, "name": "SGFsbA==", "protocol": 23, "conditions": "BQnJFA==", "linkedConditions": "Aw==", "conditionsMemSize": 8},
-  {"macProd": 523, "name": "R2FyZGVu", "protocol": 26, "conditions": "", "linkedConditions": "", "conditionsMemSize": 8}
+  {"macProd": 523, "name": "R2FyZGVu", "protocol": 26, "conditions": "", "linkedConditions": "", "conditionsMemSize": 8},
+  {"macProd": 780, "name": "QXR0aWM=", "protocol": 23, "conditions": "+g==", "linkedConditions": "", "conditionsMemSize": 8}
 ]

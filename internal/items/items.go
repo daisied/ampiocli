@@ -177,8 +177,8 @@ func short(v any) string {
 		return "(none)"
 	}
 	b, _ := json.Marshal(v)
-	if len(b) > 70 {
-		return string(b[:67]) + "..."
+	if r := []rune(string(b)); len(r) > 70 {
+		return string(r[:67]) + "..."
 	}
 	return string(b)
 }

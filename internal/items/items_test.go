@@ -2,7 +2,9 @@ package items
 
 import (
 	"slices"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func decode(t *testing.T, s string) any {
@@ -58,5 +60,12 @@ func TestMismatchIgnoresExtraFields(t *testing.T) {
 	}
 	if m := Mismatch(decode(t, `{"id":1,"name":"b"}`), actual); !slices.Equal(m, []string{`name: "b" → "a"`}) {
 		t.Errorf("got %q", m)
+	}
+}
+
+func TestShortKeepsCharacters(t *testing.T) {
+	s := short(strings.Repeat("ż", 80))
+	if !utf8.ValidString(s) || !strings.HasSuffix(s, "...") {
+		t.Errorf("short cut a character: %q", s)
 	}
 }

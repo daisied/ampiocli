@@ -17,7 +17,7 @@
 //
 //	publish base64(bytes) to device_api/to/<mac>/conditions_wr
 //	progress {"p": percent, "s": status} on device_api/from/<MAC>/status/conditions_wr/0
-//	the same for linked_conditions_wr when the rules use linked conditions
+//	the same for linked_conditions_wr when the linked table is not empty
 //
 // The answer has the mac in upper case and the bus group (0) at the end.
 package logic
@@ -27,7 +27,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -48,10 +50,11 @@ type Domain struct {
 	designer string            // Designer's address, where the codec comes from
 	codec    *designer.Codec   // loaded on first pull
 	devices  map[string]device // by mac, as last pulled
+	warn     io.Writer         // modules left out of a pull are reported here
 }
 
-func New(conn *mserv.Conn, designerURL string) *Domain {
-	return &Domain{conn: conn, designer: designerURL}
+func New(conn *mserv.Conn, designerURL string, warn io.Writer) *Domain {
+	return &Domain{conn: conn, designer: designerURL, warn: warn}
 }
 
 func (*Domain) Name() string { return "logic" }
@@ -102,7 +105,9 @@ func (d *Domain) Pull(ctx context.Context) (workdir.Files, error) {
 		rules := json.RawMessage("[]")
 		if len(dev.Conditions) > 0 {
 			if rules, err = d.codec.Decode(dev.macUniq(), dev.Conditions, dev.LinkedConditions); err != nil {
-				return nil, fmt.Errorf("decoding module %s: %w", dev.mac(), err)
+				// One module the codec cannot read does not stop the others.
+				fmt.Fprintf(d.warn, "logic: module %s left out, Designer %s cannot decode it: %v\n", dev.mac(), d.codec.Version, err)
+				continue
 			}
 		}
 		if files["logic/"+dev.mac()+".json"], err = json.Marshal(file{string(dev.Name), dev.Protocol, rules}); err != nil {
@@ -156,6 +161,7 @@ type write struct {
 // Prepare works on the module list of the pull the engine ran just before.
 func (d *Domain) Prepare(changes []items.Change, _ items.Items, _ workdir.Files) (*engine.Plan, error) {
 	var writes []write
+	var notes []string
 	for _, c := range changes {
 		if c.Added || c.Removed {
 			return nil, fmt.Errorf("%s: modules cannot be added or removed; only their rules can change", c.Key)
@@ -166,13 +172,17 @@ func (d *Domain) Prepare(changes []items.Change, _ items.Items, _ workdir.Files)
 		}
 		// The conflict check has made sure the module is still there, and new-format
 		// modules have no logic file to change.
-		w, err := d.encode(d.devices[strings.TrimPrefix(c.Key, "logic/")], after["rules"])
+		w, note, err := d.encode(d.devices[strings.TrimPrefix(c.Key, "logic/")], after["rules"])
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", c.Key, err)
+		}
+		if note != "" {
+			notes = append(notes, c.Key+": "+note)
 		}
 		writes = append(writes, w)
 	}
 	return &engine.Plan{
+		Notes:  notes,
 		Expect: changes,
 		Write: func(ctx context.Context) error {
 			for _, w := range writes {
@@ -191,56 +201,85 @@ func (d *Domain) Prepare(changes []items.Change, _ items.Items, _ workdir.Files)
 	}, nil
 }
 
-// encode runs the codec checks and returns the bytes to write.
-func (d *Domain) encode(dev device, rules any) (write, error) {
+// encode runs the codec checks and returns the bytes to write, and a note
+// when the write will differ from the module beyond the edit.
+func (d *Domain) encode(dev device, rules any) (w write, note string, err error) {
 	mac := dev.macUniq()
 	current, err := d.codec.Decode(mac, dev.Conditions, dev.LinkedConditions)
 	if err != nil {
-		return write{}, err
+		return write{}, "", err
 	}
-	again, _, err := d.codec.Encode(mac, current)
+	// Self-test: the module's own rules must encode back to its bytes.
+	again, againLinked, err := d.codec.Encode(mac, current)
 	if err != nil {
-		return write{}, err
+		return write{}, "", err
 	}
 	if !sameTable(dev.Conditions, again) {
-		return write{}, fmt.Errorf("Designer %s's codec does not reproduce this module's current bytes; not writing it", d.codec.Version)
+		return write{}, "", fmt.Errorf("Designer %s's codec does not reproduce this module's current bytes; not writing it", d.codec.Version)
+	}
+	if !sameTable(dev.LinkedConditions, againLinked) {
+		// The encoder rebuilds the linked table from the rules, so entries no
+		// rule points to drop out. That is all it may change: the module's
+		// conditions must read the same with the rebuilt table.
+		same, err := d.sameRules(mac, dev.Conditions, againLinked, current)
+		if err != nil || !same {
+			return write{}, "", fmt.Errorf("Designer %s's codec does not reproduce this module's linked table; not writing it", d.codec.Version)
+		}
+		note = "the module's linked table holds entries no rule uses; Designer leaves them too"
 	}
 
+	// Round trip: the new bytes must decode to exactly the edited rules.
 	edited, err := json.Marshal(rules)
 	if err != nil {
-		return write{}, err
+		return write{}, "", err
 	}
 	conditions, linked, err := d.codec.Encode(mac, edited)
 	if err != nil {
-		return write{}, fmt.Errorf("encoding: %w", err)
+		return write{}, "", fmt.Errorf("encoding: %w", err)
 	}
 	if len(conditions) == 0 || conditions[len(conditions)-1] != 255 {
-		return write{}, fmt.Errorf("the encoder returned bytes without the end mark")
+		return write{}, "", errors.New("the encoder returned bytes without the end mark")
 	}
 	if len(conditions) > dev.ConditionsMemSize {
-		return write{}, fmt.Errorf("the rules need %d bytes; the module has room for %d", len(conditions), dev.ConditionsMemSize)
+		return write{}, "", fmt.Errorf("the rules need %d bytes; the module has room for %d", len(conditions), dev.ConditionsMemSize)
 	}
 	back, err := d.codec.Decode(mac, conditions[:len(conditions)-1], linked)
 	if err != nil {
-		return write{}, fmt.Errorf("decoding the new bytes: %w", err)
+		return write{}, "", fmt.Errorf("decoding the new bytes: %w", err)
 	}
 	got, err := items.Decode(back)
 	if err != nil {
-		return write{}, err
+		return write{}, "", err
 	}
 	if lost := items.Fields(rules, got); len(lost) > 0 {
-		return write{}, fmt.Errorf("the edited rules do not survive encoding (unknown field or value out of range; copy an existing rule and change it):\n  rules%s",
+		return write{}, "", fmt.Errorf("the edited rules do not survive encoding (unknown field or value out of range; copy an existing rule and change it):\n  rules%s",
 			strings.Join(lost, "\n  rules"))
 	}
-	return write{dev, conditions, linked}, nil
+	return write{dev, conditions, linked}, note, nil
+}
+
+// sameRules reports whether conditions decode to rules with the linked table linked.
+func (d *Domain) sameRules(mac string, conditions, linked []byte, rules json.RawMessage) (bool, error) {
+	got, err := d.codec.Decode(mac, conditions, linked)
+	if err != nil {
+		return false, err
+	}
+	a, err := items.Decode(got)
+	if err != nil {
+		return false, err
+	}
+	b, err := items.Decode(rules)
+	return err == nil && items.Equal(a, b), err
 }
 
 // send writes one table to a module and waits for it to confirm.
 func (d *Domain) send(ctx context.Context, dev device, command string, data []byte) error {
 	topic := fmt.Sprintf("device_api/to/%s/%s", dev.mac(), command)
-	status := fmt.Sprintf("device_api/from/%s/status/%s/#", strings.ToUpper(dev.mac()), command)
+	status := fmt.Sprintf("device_api/from/%s/status/%s/0", strings.ToUpper(dev.mac()), command)
 	payload := []byte(base64.StdEncoding.EncodeToString(data))
-	return d.conn.Call(ctx, topic, payload, status, time.Minute, func(reply []byte) (bool, error) {
+	var last []byte
+	err := d.conn.Call(ctx, topic, payload, status, time.Minute, func(reply []byte) (bool, error) {
+		last = reply
 		var s struct{ P, S int }
 		if err := json.Unmarshal(reply, &s); err != nil {
 			return false, fmt.Errorf("module %s: unreadable status %q", dev.mac(), reply)
@@ -250,6 +289,10 @@ func (d *Domain) send(ctx context.Context, dev device, command string, data []by
 		}
 		return s.P >= 100 && s.S == 0, nil
 	})
+	if errors.Is(err, mserv.ErrNoAnswer) && last != nil {
+		return fmt.Errorf("module %s did not finish %s; its last status was %s", dev.mac(), command, last)
+	}
+	return err
 }
 
 // sameTable says whether a table in the module list holds encoded, the

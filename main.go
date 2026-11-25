@@ -30,7 +30,9 @@ commands:
   diff             show the edits not pushed yet (offline)
   push [--yes]     show what push would write; with --yes, write it and verify
   backups          list the backups push made
-  restore NAME     put a backup into the working copy; push then writes it back
+  restore NAME [--force]
+                   put a backup into the working copy; push then writes it back
+                   (--force discards unpushed edits)
   sim              serve the last pull as a stand-in M-SERV on this computer,
                    to try edits on a copy of the installation
 
@@ -57,7 +59,7 @@ func run(args []string, out io.Writer) error {
 	global.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	dir := global.String("C", ".", "")
 	if err := global.Parse(args); err != nil {
-		return err
+		return help(err)
 	}
 	if global.NArg() == 0 {
 		global.Usage()
@@ -73,7 +75,7 @@ func run(args []string, out io.Writer) error {
 	var only string
 	var force, yes bool
 	switch cmd {
-	case "pull":
+	case "pull", "restore":
 		flags.BoolVar(&force, "force", false, "")
 	case "push":
 		flags.BoolVar(&yes, "yes", false, "")
@@ -81,8 +83,19 @@ func run(args []string, out io.Writer) error {
 	if cmd == "pull" || cmd == "diff" || cmd == "push" {
 		flags.StringVar(&only, "only", "", "")
 	}
-	if err := flags.Parse(global.Args()[1:]); err != nil {
-		return err
+	// Flags may come before or after the arguments: restore NAME --force.
+	var params []string
+	for rest := global.Args()[1:]; ; {
+		if err := flags.Parse(rest); err != nil {
+			return help(err)
+		}
+		if flags.NArg() == 0 {
+			break
+		}
+		params, rest = append(params, flags.Arg(0)), flags.Args()[1:]
+	}
+	if cmd != "restore" && len(params) > 0 {
+		return fmt.Errorf("%s takes no arguments, got %q", cmd, params[0])
 	}
 
 	settings, err := mserv.LoadSettings(*dir)
@@ -91,7 +104,7 @@ func run(args []string, out io.Writer) error {
 	}
 	conn := mserv.New(settings)
 	defer conn.Close()
-	domains := []engine.Domain{config.New(conn), logic.New(conn, settings.Designer), nodered.New(settings)}
+	domains := []engine.Domain{config.New(conn), logic.New(conn, settings.Designer, out), nodered.New(settings)}
 	if only != "" {
 		if domains, err = pick(domains, strings.Split(only, ",")); err != nil {
 			return err
@@ -99,8 +112,10 @@ func run(args []string, out io.Writer) error {
 	}
 	e := &engine.Engine{Copy: workdir.Copy(*dir), Domains: domains, Out: out}
 
+	// The first Ctrl-C stops the work cleanly; a second one ends the process.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	context.AfterFunc(ctx, stop)
 	switch cmd {
 	case "pull":
 		return e.Pull(ctx, force)
@@ -115,10 +130,10 @@ func run(args []string, out io.Writer) error {
 		}
 		return err
 	case "restore":
-		if flags.NArg() != 1 {
+		if len(params) != 1 {
 			return errors.New("restore takes a backup name (see ampiocli backups)")
 		}
-		return e.Restore(flags.Arg(0))
+		return e.Restore(params[0], force)
 	default: // sim
 		return serve(ctx, e, settings.Designer)
 	}
@@ -148,6 +163,14 @@ func serve(ctx context.Context, e *engine.Engine, designerURL string) error {
 		s.Settings.MQTT, s.Settings.Designer, s.Settings.NodeRED, s.Settings.Password)
 	<-ctx.Done()
 	return nil
+}
+
+// help turns -h, which has printed the usage, into success.
+func help(err error) error {
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
+	return err
 }
 
 // pick keeps the named domains, in write order.

@@ -2,6 +2,7 @@ package mserv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -20,8 +21,11 @@ type Conn struct {
 
 func New(s Settings) *Conn { return &Conn{settings: s} }
 
+// ErrNoAnswer is returned by Call when the reply topic stays silent.
+var ErrNoAnswer = errors.New("no answer")
+
 // connect runs with c.mu held.
-func (c *Conn) connect() error {
+func (c *Conn) connect(ctx context.Context) error {
 	if c.client != nil {
 		return nil
 	}
@@ -37,7 +41,7 @@ func (c *Conn) connect() error {
 		SetConnectTimeout(5 * time.Second).
 		SetAutoReconnect(false)
 	client := mqtt.NewClient(opts)
-	if err := await(client.Connect()); err != nil {
+	if err := await(ctx, client.Connect()); err != nil {
 		return fmt.Errorf("mqtt %s: %w", s.MQTT, err)
 	}
 	c.client = client
@@ -64,13 +68,16 @@ func (c *Conn) Get(ctx context.Context, topic, payload, reply string) ([]byte, e
 }
 
 // Publish sends a message that has no reply.
-func (c *Conn) Publish(topic, payload string) error {
+func (c *Conn) Publish(ctx context.Context, topic, payload string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.connect(); err != nil {
+	if err := c.connect(ctx); err != nil {
 		return err
 	}
-	return await(c.client.Publish(topic, 0, false, payload))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return await(ctx, c.client.Publish(topic, 0, false, payload))
 }
 
 // Call subscribes to reply, publishes payload on topic, and hands every new
@@ -79,7 +86,7 @@ func (c *Conn) Publish(topic, payload string) error {
 func (c *Conn) Call(ctx context.Context, topic string, payload []byte, reply string, timeout time.Duration, until func([]byte) (bool, error)) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.connect(); err != nil {
+	if err := c.connect(ctx); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -95,11 +102,15 @@ func (c *Conn) Call(ctx context.Context, topic string, payload []byte, reply str
 		case <-ctx.Done():
 		}
 	}
-	if err := await(c.client.Subscribe(reply, 0, handler)); err != nil {
+	if err := await(ctx, c.client.Subscribe(reply, 0, handler)); err != nil {
 		return err
 	}
 	defer c.client.Unsubscribe(reply)
-	if err := await(c.client.Publish(topic, 0, false, payload)); err != nil {
+	// A push interrupted before this point sends nothing more.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := await(ctx, c.client.Publish(topic, 0, false, payload)); err != nil {
 		return err
 	}
 	for {
@@ -109,14 +120,24 @@ func (c *Conn) Call(ctx context.Context, topic string, payload []byte, reply str
 				return err
 			}
 		case <-ctx.Done():
-			return fmt.Errorf("no answer on %s after %s", reply, timeout)
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("%w on %s after %s", ErrNoAnswer, reply, timeout)
+			}
+			return ctx.Err()
 		}
 	}
 }
 
-func await(t mqtt.Token) error {
-	if !t.WaitTimeout(10 * time.Second) {
-		return fmt.Errorf("mqtt: timed out")
+// await waits for an MQTT operation, at most 10 s, and no longer than ctx.
+func await(ctx context.Context, t mqtt.Token) error {
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-t.Done():
+		return t.Error()
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return errors.New("mqtt: timed out")
 	}
-	return t.Error()
 }

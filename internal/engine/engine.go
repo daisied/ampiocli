@@ -7,9 +7,11 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/daisied/ampiocli/internal/items"
@@ -46,6 +48,9 @@ type Plan struct {
 	Work workdir.Files
 	// After, if set, runs once the write is verified.
 	After func(ctx context.Context) error
+	// Notes are shown with the push's checks: what the write will do that
+	// the diff does not say.
+	Notes []string
 }
 
 // Engine works on one working copy. Domains are in write order.
@@ -100,6 +105,9 @@ func (e *Engine) save(d Domain, files workdir.Files) error {
 // Pull replaces the working copy with the live state. Unpushed edits stop
 // it unless force is set.
 func (e *Engine) Pull(ctx context.Context, force bool) error {
+	if err := e.Copy.Ignore(); err != nil {
+		return err
+	}
 	if !force {
 		all, err := e.unpushed()
 		if err != nil {
@@ -154,8 +162,9 @@ func (e *Engine) show(domain string, changes []items.Change) {
 //     pull; edits the live state already has (from a push that failed
 //     part-way) are skipped
 //  2. prepare the write, so a bad edit stops the push before anything is written
-//  3. back up the live state (all domains, before the first write)
-//  4. write, pull again and check that every change reads back
+//  3. back up the live state of every domain, before the first write
+//  4. check the live state again just before writing, then write, pull again
+//     and check that every change reads back
 //  5. make the new live state the base and work state
 func (e *Engine) Push(ctx context.Context, write bool) error {
 	all, err := e.unpushed()
@@ -165,11 +174,6 @@ func (e *Engine) Push(ctx context.Context, write bool) error {
 	if len(all) == 0 {
 		fmt.Fprintln(e.Out, "nothing to push")
 		return nil
-	}
-	type step struct {
-		domain Domain
-		files  workdir.Files // the live state
-		plan   *Plan         // nil when the live state already has every edit
 	}
 	var steps []step
 	backup := workdir.Files{}
@@ -192,10 +196,13 @@ func (e *Engine) Push(ctx context.Context, write bool) error {
 		if done := len(u.changes) - len(todo); done > 0 {
 			fmt.Fprintf(e.Out, "%s: %d already on the M-SERV\n", name, done)
 		}
-		s := step{u.domain, files, nil}
+		s := step{u, files, todo, nil}
 		if len(todo) > 0 {
 			if s.plan, err = u.domain.Prepare(todo, live, u.work); err != nil {
 				return fmt.Errorf("%s: %w\nnothing written", name, err)
+			}
+			for _, n := range s.plan.Notes {
+				fmt.Fprintf(e.Out, "%s: %s\n", name, n)
 			}
 		}
 		steps = append(steps, s)
@@ -204,6 +211,17 @@ func (e *Engine) Push(ctx context.Context, write bool) error {
 	if !write {
 		fmt.Fprintln(e.Out, "checked against the M-SERV; nothing written (push --yes writes)")
 		return nil
+	}
+	// The backup holds every domain, so that it is the whole state the push started from.
+	for _, d := range e.Domains {
+		if slices.ContainsFunc(steps, func(s step) bool { return s.domain == d }) {
+			continue
+		}
+		files, err := d.Pull(ctx)
+		if err != nil {
+			return fmt.Errorf("%s: backing up: %w\nnothing written", d.Name(), err)
+		}
+		maps.Copy(backup, files)
 	}
 	dir, err := e.Copy.Backup(backup)
 	if err != nil {
@@ -217,10 +235,49 @@ func (e *Engine) Push(ctx context.Context, write bool) error {
 			}
 			continue
 		}
+		if err := recheck(ctx, s); err != nil {
+			return fmt.Errorf("%s: %w\nnothing written to %s; push again to check and write it\nbackup of the state before this push: %s",
+				s.domain.Name(), err, s.domain.Name(), dir)
+		}
 		if err := e.apply(ctx, s.domain, s.plan); err != nil {
 			return fmt.Errorf("%s: %w\nbackup of the state before this push: %s", s.domain.Name(), err, dir)
 		}
 		fmt.Fprintf(e.Out, "%s: written and verified\n", s.domain.Name())
+	}
+	return nil
+}
+
+// step is one domain's part of a push.
+type step struct {
+	edits
+	files workdir.Files // the live state when checked
+	todo  []items.Change
+	plan  *Plan // nil when the live state already has every edit
+}
+
+// recheck reads a domain's live state again just before it is written. The
+// checks ran before the backup and the other domains' writes; this narrows
+// the window for a change on the M-SERV to the write itself.
+func recheck(ctx context.Context, s step) error {
+	files, err := s.domain.Pull(ctx)
+	if err != nil {
+		return err
+	}
+	live, err := s.domain.Items(files)
+	if err != nil {
+		return err
+	}
+	todo, conflicts := triage(s.edits, live)
+	if len(conflicts) > 0 {
+		return fmt.Errorf("changed on the M-SERV during the push: %s", strings.Join(conflicts, ", "))
+	}
+	if len(todo) != len(s.todo) {
+		return errors.New("some of the edits appeared on the M-SERV during the push")
+	}
+	for _, c := range s.plan.Expect {
+		if _, taken := live[c.Key]; c.Added && taken {
+			return fmt.Errorf("%s was created on the M-SERV during the push", c.Key)
+		}
 	}
 	return nil
 }
@@ -293,10 +350,20 @@ func applied(c items.Change, live any, ok bool) bool {
 
 // Restore puts a backup's files into the working copy, so that the next
 // push writes them back. Domains the backup does not hold are left alone.
-func (e *Engine) Restore(name string) error {
+// Unpushed edits stop it unless force is set.
+func (e *Engine) Restore(name string, force bool) error {
 	t, err := e.Copy.BackupTree(name)
 	if err != nil {
 		return err
+	}
+	if !force {
+		all, err := e.unpushed()
+		if err != nil {
+			return err
+		}
+		if len(all) > 0 {
+			return fmt.Errorf("unpushed edits in %s (see ampiocli diff); push them, or restore --force to discard them", names(all))
+		}
 	}
 	for _, d := range e.Domains {
 		files, err := t.Read(d.Owns)

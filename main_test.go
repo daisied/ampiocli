@@ -163,28 +163,120 @@ func TestPush(t *testing.T) {
 		t.Errorf("flows not deployed:\n%s", flows)
 	}
 
-	// Restoring the backup undoes the push, except that the new objects cannot
-	// be deleted (the M-SERV only soft-deletes objects).
+	// Restoring the backup undoes the push. The M-SERV cannot delete objects,
+	// so the new ones are hidden, as Designer does.
 	backups := strings.Fields(me.must("backups"))
 	me.must("restore", backups[0])
-	if _, err := me.run("push", "--yes"); err == nil || !strings.Contains(err.Error(), "cannot be deleted") {
-		t.Fatalf("restore deleted an object: %v", err)
+	if out := me.must("push", "--yes"); !strings.Contains(out, "config/objects/4 cannot be deleted; hiding it") {
+		t.Errorf("restore did not say it hides the new objects:\n%s", out)
 	}
-	me.must("push", "--yes", "--only", "logic,nodered")
 	check.must("pull")
 	if strings.Contains(check.read("logic/10a.json"), `"value": 12`) || strings.Contains(check.read("nodered/lights.json"), `"n2"`) {
 		t.Error("restore did not undo the logic and flow edits")
 	}
+	for _, r := range readRows(t, check, "config/objects.json") {
+		if hidden := r["params"] == 16.0; hidden != (r["id"].(float64) > 2) {
+			t.Errorf("after restore, object %v has params %v", r["id"], r["params"])
+		}
+	}
+	if out := me.must("diff"); out != "no edits\n" {
+		t.Errorf("edits left after restore and push:\n%s", out)
+	}
+}
+
+func readRows(t *testing.T, c wc, file string) rows {
+	t.Helper()
+	var r rows
+	if err := json.Unmarshal([]byte(c.read(file)), &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
 
 // Modules from protocol 25 on store logic in a format Designer writes
-// another way; they get no logic file.
-func TestPullSkipsNewFormatModules(t *testing.T) {
+// another way; they get no logic file. Nor does a module the codec cannot
+// decode, which is reported and does not stop the pull.
+func TestPullSkipsModules(t *testing.T) {
+	house(t)
+	me := newCopy(t)
+	out := me.must("pull")
+	if _, err := os.Stat(filepath.Join(me.dir, "logic/20b.json")); err == nil {
+		t.Error("a protocol 26 module was decoded")
+	}
+	if _, err := os.Stat(filepath.Join(me.dir, "logic/30c.json")); err == nil || !strings.Contains(out, "module 30c left out") {
+		t.Errorf("an undecodable module was not left out with a warning:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(me.dir, "logic/10a.json")); err != nil {
+		t.Error("the readable module is missing")
+	}
+}
+
+// A pull keeps the password and the bookkeeping out of git, and keeps
+// whatever else the .gitignore holds.
+func TestPullIgnoresSecrets(t *testing.T) {
+	house(t)
+	me := newCopy(t)
+	if err := os.WriteFile(filepath.Join(me.dir, ".gitignore"), []byte("notes.txt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	me.must("pull")
+	me.must("pull")
+	if got := me.read(".gitignore"); got != "notes.txt\n.env\n.ampiocli/\n" {
+		t.Errorf(".gitignore:\n%s", got)
+	}
+}
+
+// Deleting an object hides it, as Designer does, and the row stays in the
+// working copy with the DELETED bit.
+func TestDeleteHides(t *testing.T) {
+	house(t)
+	me, check := newCopy(t), newCopy(t)
+	me.must("pull")
+	edit(me, "config/objects.json", func(r *rows) { *r = (*r)[:1] })
+	if out := me.must("push"); !strings.Contains(out, "config/objects/2 cannot be deleted; hiding it with the DELETED bit (16)") {
+		t.Errorf("the dry run does not say the object is hidden:\n%s", out)
+	}
+	me.must("push", "--yes")
+	check.must("pull")
+	for _, c := range []wc{me, check} {
+		if r := readRows(t, c, "config/objects.json"); len(r) != 2 || r[1]["params"] != 16.0 {
+			t.Errorf("the porch light is not hidden: %v", r)
+		}
+	}
+	if out := me.must("diff"); out != "no edits\n" {
+		t.Errorf("edits left after hiding:\n%s", out)
+	}
+}
+
+// A push backs up every domain, not only the ones it writes.
+func TestBackupHoldsEverything(t *testing.T) {
 	house(t)
 	me := newCopy(t)
 	me.must("pull")
-	if _, err := os.Stat(filepath.Join(me.dir, "logic/20b.json")); err == nil {
-		t.Fatal("a protocol 26 module was decoded")
+	edit(me, "config/objects.json", func(r *rows) { (*r)[0]["opis_menu"] = "Hall lights" })
+	me.must("push", "--yes", "--only", "config,logic,nodered")
+	backup := filepath.Join(me.dir, ".ampiocli/backups", strings.TrimSpace(me.must("backups")))
+	for _, f := range []string{"config/objects.json", "devices.json", "logic/10a.json", "nodered/lights.json"} {
+		if _, err := os.Stat(filepath.Join(backup, f)); err != nil {
+			t.Errorf("backup lacks %s", f)
+		}
+	}
+}
+
+func TestRestoreKeepsEdits(t *testing.T) {
+	house(t)
+	me := newCopy(t)
+	me.must("pull")
+	edit(me, "config/objects.json", func(r *rows) { (*r)[0]["opis_menu"] = "Hall lights" })
+	me.must("push", "--yes")
+	backup := strings.TrimSpace(me.must("backups"))
+	edit(me, "config/objects.json", func(r *rows) { (*r)[0]["opis_menu"] = "Hallway" })
+	if _, err := me.run("restore", backup); err == nil || !strings.Contains(err.Error(), "unpushed edits in config") {
+		t.Fatalf("restore over unpushed edits: %v", err)
+	}
+	me.must("restore", backup, "--force")
+	if !strings.Contains(me.read("config/objects.json"), `"Hall light"`) {
+		t.Error("restore --force did not restore")
 	}
 }
 
@@ -202,6 +294,15 @@ func TestCommandLine(t *testing.T) {
 	}
 	if _, err := me.run("diff", "--only", "config,flows"); err == nil || !strings.Contains(err.Error(), `no domain "flows"`) {
 		t.Errorf("--only with a wrong domain: %v", err)
+	}
+	if _, err := me.run("push", "now"); err == nil || !strings.Contains(err.Error(), "push takes no arguments") {
+		t.Errorf("a stray argument: %v", err)
+	}
+	if _, err := me.run("-h"); err != nil {
+		t.Errorf("-h: %v", err)
+	}
+	if _, err := me.run("diff", "-h"); err != nil {
+		t.Errorf("diff -h: %v", err)
 	}
 }
 
@@ -279,8 +380,8 @@ func TestPushRefuses(t *testing.T) {
 	})
 	refuse("value out of range")
 
-	edit(me, "config/objects.json", func(r *rows) { *r = (*r)[1:] })
-	refuse("cannot be deleted")
+	edit(me, "config/resources.json", func(r *rows) { *r = (*r)[1:] })
+	refuse("rows in resources cannot be deleted")
 
 	edit(me, "config/objects.json", func(r *rows) { *r = append(*r, map[string]any{"id": "@hall", "params": 0}) })
 	edit(me, "config/groups.json", func(r *rows) { *r = append(*r, map[string]any{"id": "@hall", "params": 0}) })
@@ -299,5 +400,63 @@ func TestPushRefuses(t *testing.T) {
 	edit(me, "config/objects.json", func(r *rows) { (*r)[0]["opis_menu"] = "Hall" })
 	if _, err := me.run("pull"); err == nil || !strings.Contains(err.Error(), "unpushed edits in config") {
 		t.Fatalf("pull over unpushed edits: %v", err)
+	}
+}
+
+// Edits to rules or flows someone changed since the pull are refused.
+func TestPushRefusesConflicts(t *testing.T) {
+	house(t)
+	me, them := newCopy(t), newCopy(t)
+	me.must("pull")
+	them.must("pull")
+	edit(them, "logic/10a.json", func(f *map[string]any) {
+		(*f)["rules"].([]any)[0].(map[string]any)["value"] = 6
+	})
+	edit(them, "nodered/lights.json", func(r *rows) { (*r)[1]["name"] = "their tick" })
+	them.must("push", "--yes")
+
+	edit(me, "logic/10a.json", func(f *map[string]any) {
+		(*f)["rules"].([]any)[0].(map[string]any)["value"] = 7
+	})
+	if _, err := me.run("push", "--yes"); err == nil || !strings.Contains(err.Error(), "changed on the M-SERV since your pull: logic/10a") {
+		t.Fatalf("logic conflict: %v", err)
+	}
+	me.must("pull", "--force")
+	them.must("pull")
+	edit(them, "nodered/lights.json", func(r *rows) { (*r)[1]["name"] = "their tock" })
+	them.must("push", "--yes")
+	edit(me, "nodered/lights.json", func(r *rows) { (*r)[1]["name"] = "my tock" })
+	if _, err := me.run("push", "--yes"); err == nil || !strings.Contains(err.Error(), "changed on the M-SERV since your pull: nodered/n1") {
+		t.Fatalf("Node-RED conflict: %v", err)
+	}
+}
+
+// A deploy someone makes between the checks and the write is not overwritten.
+func TestNodeREDRefusesRace(t *testing.T) {
+	s := house(t)
+	me, check := newCopy(t), newCopy(t)
+	me.must("pull")
+	edit(me, "nodered/lights.json", func(r *rows) { (*r)[1]["name"] = "tock" })
+	s.DeployFirst()
+	if _, err := me.run("push", "--yes"); err == nil || !strings.Contains(err.Error(), "someone deployed Node-RED flows") {
+		t.Fatalf("want the deploy refused, got %v", err)
+	}
+	check.must("pull")
+	if strings.Contains(check.read("nodered/lights.json"), "tock") {
+		t.Error("the deploy went through")
+	}
+}
+
+func TestNodeREDLogin(t *testing.T) {
+	s := house(t)
+	s.NodeREDLogin()
+	me := newCopy(t)
+	me.must("pull")
+	edit(me, "nodered/lights.json", func(r *rows) { (*r)[1]["name"] = "tock" })
+	me.must("push", "--yes")
+
+	t.Setenv("NODERED_PASSWORD", "wrong")
+	if _, err := newCopy(t).run("pull", "--only", "nodered"); err == nil || !strings.Contains(err.Error(), "check NODERED_USER / NODERED_PASSWORD") {
+		t.Errorf("a wrong Node-RED password: %v", err)
 	}
 }

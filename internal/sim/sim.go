@@ -48,6 +48,8 @@ type Sim struct {
 	flows   []any
 	rev     int
 	refuse  map[string]bool // tables whose next save fails
+	login   bool            // Node-RED's admin API needs a token
+	race    bool            // someone deploys flows just before the next deploy
 	log     io.Writer
 
 	broker *mqtt.Server
@@ -109,9 +111,10 @@ func Start(files workdir.Files, designerDir string, log io.Writer) (_ *Sim, err 
 		return nil, err
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /auth/login", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("{}")) })
-	mux.HandleFunc("GET /flows", s.getFlows)
-	mux.HandleFunc("POST /flows", s.postFlows)
+	mux.HandleFunc("GET /auth/login", s.authScheme)
+	mux.HandleFunc("POST /auth/token", s.authToken)
+	mux.HandleFunc("GET /flows", s.authorized(s.getFlows))
+	mux.HandleFunc("POST /flows", s.authorized(s.postFlows))
 	mux.Handle("GET /", http.FileServer(http.Dir(designerDir)))
 	s.web = &http.Server{Handler: mux}
 	go s.web.Serve(ln)
@@ -125,6 +128,21 @@ func Start(files workdir.Files, designerDir string, log io.Writer) (_ *Sim, err 
 func (s *Sim) Close() {
 	s.web.Close()
 	s.broker.Close()
+}
+
+// NodeREDLogin turns on Node-RED's admin login: the flows API then needs a
+// token, which the admin user and password get.
+func (s *Sim) NodeREDLogin() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.login = true
+}
+
+// DeployFirst makes someone else deploy Node-RED flows just before the next deploy.
+func (s *Sim) DeployFirst() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.race = true
 }
 
 // Refuse makes the next save of table fail, as when the M-SERV rejects one.
@@ -212,7 +230,8 @@ func (s *Sim) writeModule(topic string, payload []byte) {
 	s.mu.Lock()
 	for _, d := range s.devices {
 		row, _ := d.(map[string]any)
-		if n, _ := row["macProd"].(json.Number).Int64(); strconv.FormatInt(n, 16) == mac {
+		mp, _ := row["macProd"].(json.Number)
+		if n, err := mp.Int64(); err == nil && strconv.FormatInt(n, 16) == mac {
 			row[field] = base64.StdEncoding.EncodeToString(data)
 			fmt.Fprintf(s.log, "module %s: wrote %s (%d bytes)\n", mac, field, len(data))
 		}
@@ -221,6 +240,39 @@ func (s *Sim) writeModule(topic string, payload []byte) {
 	status := fmt.Sprintf("device_api/from/%s/status/%s/0", strings.ToUpper(mac), command)
 	s.publishJSON(status, map[string]int{"p": 50, "s": 1})
 	s.publishJSON(status, map[string]int{"p": 100, "s": 0})
+}
+
+const token = "sim-token"
+
+func (s *Sim) authScheme(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.login {
+		w.Write([]byte(`{"type":"credentials","prompts":[]}`))
+	} else {
+		w.Write([]byte("{}"))
+	}
+}
+
+func (s *Sim) authToken(w http.ResponseWriter, r *http.Request) {
+	if r.FormValue("username") != s.Settings.NodeREDUser || r.FormValue("password") != s.Settings.NodeREDPassword {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusForbidden)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"access_token": token, "token_type": "Bearer"})
+}
+
+func (s *Sim) authorized(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		login := s.login
+		s.mu.Unlock()
+		if login && r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "", http.StatusUnauthorized)
+			return
+		}
+		h(w, r)
+	}
 }
 
 func (s *Sim) getFlows(w http.ResponseWriter, _ *http.Request) {
@@ -240,6 +292,11 @@ func (s *Sim) postFlows(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.race {
+		s.race = false
+		s.rev++
+		fmt.Fprintln(s.log, "nodered: someone else deployed")
+	}
 	if deploy["rev"] != fmt.Sprint(s.rev) {
 		http.Error(w, `{"code":"version_mismatch"}`, http.StatusConflict)
 		return

@@ -95,8 +95,15 @@ func (s *source) download(p string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, errors.New(resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxFile+1))
+	if err == nil && len(b) > maxFile {
+		err = fmt.Errorf("larger than %d MB", maxFile>>20)
+	}
+	return b, err
 }
+
+// maxFile caps one Designer file; the chunk with the codec is about 18 MB.
+const maxFile = 128 << 20
 
 // codecChunk follows index.html to its entry script and that script's static
 // imports, and returns the path of the one that contains the codec.

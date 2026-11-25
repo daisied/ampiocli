@@ -13,7 +13,7 @@ description: Change an Ampio smart-home installation (M-SERV app configuration, 
 go install github.com/daisied/ampiocli@latest
 ```
 
-The working copy is a folder with a `.env` holding `AMPIO_HOST` and `AMPIO_PASSWORD`. If there is none, ask the person for the M-SERV address and admin password, and write them into `.env` yourself. Never print the password or commit `.env`.
+The working copy is a folder with a `.env` holding `AMPIO_HOST` and `AMPIO_PASSWORD`. If there is none, ask the person for the M-SERV address and admin password, and write them into `.env` yourself. Never print the password or commit `.env`. `pull` adds `.env` and `.ampiocli/` to `.gitignore` for you.
 
 ## Rules
 
@@ -50,7 +50,7 @@ ampiocli push --yes           # backup, write, read back, verify
 
 - To change a row, edit fields in place.
 - To add a row, copy a similar row and give it a placeholder id of its own, `"id": "@kitchen_spot"`. Use the same placeholder in the id column of any other new or changed row that must point at it (`id_obiektu`, `id_grupy`, `id_rodzica`, `lokalizacja`, ...; for example `"id_obiektu": "@kitchen_spot"` in `group_objects.json`). Push turns it into the next free id.
-- Rows in `objects`, `groups`, `resources`, `flag_conditions` and `data` cannot be deleted. To hide an object or group, set bit 16 in `params` (`params | 16`). Rows in `group_objects`, `connected_objects` and `locations` can be removed by deleting them from the file.
+- To remove a row, delete it from the file. Rows in `group_objects`, `connected_objects` and `locations` are deleted. Objects and groups can't be deleted, so push hides them instead by setting the DELETED bit (16) in `params`, and says so in the dry run. Rows in `resources`, `flag_conditions` and `data` can't be removed at all.
 - `conditions` and `scenes` are read-only.
 
 ### Module rules
@@ -70,10 +70,10 @@ ampiocli push --yes           # backup, write, read back, verify
 
 | Message | Meaning, and what to do |
 |---|---|
-| `changed on the M-SERV since your pull: …` | Someone changed it in Designer or the app. Nothing was written. Note your edit, run `pull --force`, redo the edit, and check again. |
+| `changed on the M-SERV since your pull: …` or `… during the push` | Someone changed it in Designer or the app. Nothing was written. Note your edit, run `pull --force`, redo the edit, and check again. |
 | `… nothing written` | A check refused before any write. Fix the edit. |
-| `the M-SERV refused the … save`, `no answer on …` | The push stopped part-way. Tell the person. Once they say go, run `push --yes` again: it skips what was already written. |
+| `the M-SERV refused the … save`, `no answer on …`, `module … did not finish …` | The push stopped part-way. Tell the person. Once they say go, run `push --yes` again: it skips what was already written. |
 | `written, but … reads back differently` / `… is missing` | The M-SERV took the write but stored something else. Stop, and show the person the message and the backup folder. |
 | `module … refused …` | The module refused the write. Stop, and tell the person. |
 
-To undo a push, run `ampiocli backups`, then `ampiocli restore <name>`. Show the `ampiocli push` dry run to the person, then run `push --yes` once they say go. A restore can't delete rows the push created in non-removable tables. Hide those with the DELETED bit instead.
+To undo a push, run `ampiocli backups`, then `ampiocli restore <name>`. Show the `ampiocli push` dry run to the person, then run `push --yes` once they say go. Objects and groups the push created get hidden, not deleted; the dry run says so. `restore` refuses while there are unpushed edits. Ask the person before using `restore --force`, which throws them away.

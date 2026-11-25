@@ -180,14 +180,68 @@ func (t Tree) Write(files Files, owns func(path string) bool) error {
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(t.path(p)), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(t.path(p), text, 0o644); err != nil {
+		if err := writeFile(t.path(p), text); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// writeFile writes through a temporary file and a rename, so a crash never
+// leaves a half-written file.
+func writeFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".ampiocli-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // fails once renamed
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+// ignored are the paths a working copy's .gitignore must hold: .env has the
+// M-SERV's admin password, and .ampiocli the base and the backups.
+var ignored = []string{".env", meta + "/"}
+
+// Ignore adds what is missing of ignored to the copy's .gitignore, so that a
+// working copy kept in git never commits the password.
+func (c Copy) Ignore() error {
+	path := filepath.Join(string(c), ".gitignore")
+	old, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	have := map[string]bool{}
+	for _, line := range strings.Split(string(old), "\n") {
+		have[strings.TrimSpace(line)] = true
+	}
+	text := string(old)
+	if len(old) > 0 && !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	added := false
+	for _, p := range ignored {
+		if !have[p] && !have["/"+p] {
+			text += p + "\n"
+			added = true
+		}
+	}
+	if !added {
+		return nil
+	}
+	return writeFile(path, []byte(text))
 }
 
 var (
@@ -203,9 +257,7 @@ func (c Copy) extractBlobs(text []byte) ([]byte, error) {
 		name := hex.EncodeToString(sum[:8])
 		path := filepath.Join(c.blobs(), name+".b64")
 		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
-			if e := os.MkdirAll(c.blobs(), 0o755); e != nil {
-				err = e
-			} else if e := os.WriteFile(path, data, 0o644); e != nil {
+			if e := writeFile(path, data); e != nil {
 				err = e
 			}
 		}
