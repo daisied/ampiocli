@@ -1,8 +1,15 @@
 # ampiocli
 
-ampiocli turns an Ampio installation into a folder of JSON files. You pull, edit the files, check the diff, and push, the same way you'd work with git.
+Change an Ampio installation without opening Designer. ampiocli reads the M-SERV into plain files and writes your edits back, so you can:
 
-It covers the three places a house's behaviour lives:
+- **Edit the app.** Add, rename, regroup or hide objects and groups.
+- **Edit module logic.** Change, add or switch off the rules a CAN module runs, as readable JSON instead of Designer's rule editor.
+- **Edit Node-RED.** Change flows or add new ones.
+- **Search the whole house.** Find every rule and flow that uses flag 12, or every object in the kitchen, with one grep.
+- **Make bulk changes.** Rename 40 objects to English, or give each bedroom the same tiles, in one edit.
+- **Keep a history.** Commit the folder to git after each pull and you have a record of every change, including the ones made in Designer.
+
+You see every change before it's written, a backup is taken first, and each write is read back and checked. Scripts and coding agents can use it the same way, and `SKILL.md` tells an agent how.
 
 | Files | What they hold |
 |---|---|
@@ -10,7 +17,7 @@ It covers the three places a house's behaviour lives:
 | `logic/<mac>.json` | The rules each CAN module runs on its own |
 | `nodered/<tab>.json` | The Node-RED flows on the M-SERV |
 
-It talks to the M-SERV exactly as Designer does, over the same MQTT topics, and it encodes module rules with Designer's own code. Nothing is written until `push --yes`, and every write is read back and checked.
+It talks to the M-SERV exactly as Designer does, over the same MQTT topics, and it encodes module rules with Designer's own code.
 
 ```
 $ ampiocli pull
