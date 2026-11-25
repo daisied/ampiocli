@@ -189,7 +189,7 @@ GOPRIVATE=github.com/daisied go install github.com/daisied/ampiocli@latest
 Put the M-SERV's address and admin password in `.env` in the working-copy folder (see `.env.example`):
 
 ```
-AMPIO_HOST=192.168.1.250
+AMPIO_HOST=192.168.1.10
 AMPIO_PASSWORD=...
 ```
 
