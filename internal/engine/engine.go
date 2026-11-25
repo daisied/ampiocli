@@ -28,10 +28,10 @@ type Domain interface {
 	Pull(ctx context.Context) (workdir.Files, error)
 	// Items flattens the domain's files into items.
 	Items(files workdir.Files) (items.Items, error)
-	// Prepare checks and encodes changes before anything is written. live is
-	// what the Pull just before read, work the domain's working-copy files.
-	// It must not write.
-	Prepare(ctx context.Context, changes []items.Change, live items.Items, work workdir.Files) (*Plan, error)
+	// Prepare checks and encodes changes before anything is written. It must
+	// not write. live is what the Pull just before read and work the domain's
+	// working-copy files, for the domains that need them.
+	Prepare(changes []items.Change, live items.Items, work workdir.Files) (*Plan, error)
 }
 
 // Plan is a prepared write.
@@ -66,7 +66,7 @@ type edits struct {
 func (e *Engine) unpushed() ([]edits, error) {
 	var out []edits
 	for _, d := range e.Domains {
-		base, err := e.items(d, e.Copy.Base())
+		base, err := e.Copy.Base().Read(d.Owns)
 		if err != nil {
 			return nil, err
 		}
@@ -74,23 +74,19 @@ func (e *Engine) unpushed() ([]edits, error) {
 		if err != nil {
 			return nil, err
 		}
+		baseItems, err := d.Items(base)
+		if err != nil {
+			return nil, err
+		}
 		workItems, err := d.Items(work)
 		if err != nil {
 			return nil, err
 		}
-		if changes := items.Diff(base, workItems); len(changes) > 0 {
-			out = append(out, edits{d, base, work, changes})
+		if changes := items.Diff(baseItems, workItems); len(changes) > 0 {
+			out = append(out, edits{d, baseItems, work, changes})
 		}
 	}
 	return out, nil
-}
-
-func (e *Engine) items(d Domain, t workdir.Tree) (items.Items, error) {
-	files, err := t.Read(d.Owns)
-	if err != nil {
-		return nil, err
-	}
-	return d.Items(files)
 }
 
 // save records files as both the base and the work state of d.
@@ -136,12 +132,12 @@ func (e *Engine) Diff() error {
 		fmt.Fprintln(e.Out, "no edits")
 	}
 	for _, u := range all {
-		e.print(u.domain.Name(), u.changes)
+		e.show(u.domain.Name(), u.changes)
 	}
 	return nil
 }
 
-func (e *Engine) print(domain string, changes []items.Change) {
+func (e *Engine) show(domain string, changes []items.Change) {
 	fmt.Fprintf(e.Out, "%s: %d changed\n", domain, len(changes))
 	for _, c := range changes {
 		for _, line := range items.Describe(c) {
@@ -172,14 +168,14 @@ func (e *Engine) Push(ctx context.Context, write bool) error {
 	}
 	type step struct {
 		domain Domain
-		live   workdir.Files
-		plan   *Plan // nil when the live state already has every edit
+		files  workdir.Files // the live state
+		plan   *Plan         // nil when the live state already has every edit
 	}
 	var steps []step
 	backup := workdir.Files{}
 	for _, u := range all {
 		name := u.domain.Name()
-		e.print(name, u.changes)
+		e.show(name, u.changes)
 		files, err := u.domain.Pull(ctx)
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
@@ -198,7 +194,7 @@ func (e *Engine) Push(ctx context.Context, write bool) error {
 		}
 		s := step{u.domain, files, nil}
 		if len(todo) > 0 {
-			if s.plan, err = u.domain.Prepare(ctx, todo, live, u.work); err != nil {
+			if s.plan, err = u.domain.Prepare(todo, live, u.work); err != nil {
 				return fmt.Errorf("%s: %w\nnothing written", name, err)
 			}
 		}
@@ -216,7 +212,7 @@ func (e *Engine) Push(ctx context.Context, write bool) error {
 	fmt.Fprintf(e.Out, "backup: %s\n", dir)
 	for _, s := range steps {
 		if s.plan == nil {
-			if err := e.save(s.domain, s.live); err != nil {
+			if err := e.save(s.domain, s.files); err != nil {
 				return err
 			}
 			continue
@@ -255,7 +251,7 @@ func (e *Engine) apply(ctx context.Context, d Domain, plan *Plan) error {
 		case !ok:
 			return fmt.Errorf("written, but %s is missing", c.Key)
 		default:
-			return fmt.Errorf("written, but %s reads back differently:\n  %s", c.Key, strings.Join(items.Mismatch(got, c.After), "\n  "))
+			return fmt.Errorf("written, but %s reads back differently:\n  %s", c.Key, strings.Join(items.Mismatch(c.After, got), "\n  "))
 		}
 	}
 	if err := e.save(d, files); err != nil {
@@ -292,7 +288,7 @@ func applied(c items.Change, live any, ok bool) bool {
 	if c.Removed {
 		return !ok
 	}
-	return ok && len(items.Mismatch(live, c.After)) == 0
+	return ok && len(items.Mismatch(c.After, live)) == 0
 }
 
 // Restore puts a backup's files into the working copy, so that the next

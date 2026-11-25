@@ -53,10 +53,10 @@ func TestDiffAndDescribe(t *testing.T) {
 
 func TestMismatchIgnoresExtraFields(t *testing.T) {
 	actual := decode(t, `{"id":1,"name":"a","stamp":5}`)
-	if m := Mismatch(actual, decode(t, `{"id":1,"name":"a"}`)); m != nil {
+	if m := Mismatch(decode(t, `{"id":1,"name":"a"}`), actual); m != nil {
 		t.Errorf("extra field counted: %q", m)
 	}
-	if m := Mismatch(actual, decode(t, `{"id":1,"name":"b"}`)); !slices.Equal(m, []string{`name: "b" → "a"`}) {
+	if m := Mismatch(decode(t, `{"id":1,"name":"b"}`), actual); !slices.Equal(m, []string{`name: "b" → "a"`}) {
 		t.Errorf("got %q", m)
 	}
 }

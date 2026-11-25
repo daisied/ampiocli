@@ -5,8 +5,8 @@ package designer
 // codec included. Running the whole app would need a browser. Instead
 // ampiocli parses the chunk and copies out only the top-level declarations
 // the codec reaches, the way a linker keeps only the functions a program
-// calls. The result is a small program (under 1 MB) that runs in goja, a
-// JavaScript interpreter written in Go.
+// calls. The result, about 1.4 MB, runs in goja, a JavaScript interpreter
+// written in Go.
 
 import (
 	"cmp"

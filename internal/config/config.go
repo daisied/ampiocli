@@ -6,7 +6,9 @@
 //
 //	read:  publish "<table>" to ampio/control/admin/config
 //	       reply  {"List":[rows]} on ampio/fromDB/admin/config/<table>
-//	save:  publish {"List":[changed rows]} to ampio/control/admin/config/save/<table>
+//	save:  publish {"List":[changed rows]} to ampio/control/admin/config/save/<table>,
+//	       or save/<table>_nc for the tables rows can be removed from, which
+//	       also take {"idToRemove": id} entries
 //	       reply  "0" on ampio/fromDB/admin/config/statusSave/<code>
 //	then:  publish "refresh" to ampio/control/admin/data (the app reloads)
 //
@@ -110,11 +112,11 @@ func (*Domain) Items(files workdir.Files) (items.Items, error) {
 			if !ok || row["id"] == nil {
 				return nil, fmt.Errorf("%s: row %d has no id", path, i)
 			}
-			key := fmt.Sprintf("config/%s/%v", name, row["id"])
-			if _, dup := out[key]; dup {
+			k := key(name, row["id"])
+			if _, dup := out[k]; dup {
 				return nil, fmt.Errorf("%s: two rows with id %v", path, row["id"])
 			}
-			out[key] = row
+			out[k] = row
 		}
 	}
 	return out, nil
@@ -129,14 +131,17 @@ func lookup(name string) (table, bool) {
 	return table{}, false
 }
 
-// split turns config/<table>/<id> into its parts.
+// key is the item key of a table row.
+func key(table string, id any) string { return fmt.Sprintf("config/%s/%v", table, id) }
+
+// split turns a row's key into its parts.
 func split(key string) (table, string) {
 	name, id, _ := strings.Cut(strings.TrimPrefix(key, "config/"), "/")
 	t, _ := lookup(name)
 	return t, id
 }
 
-func (d *Domain) Prepare(_ context.Context, changes []items.Change, live items.Items, work workdir.Files) (*engine.Plan, error) {
+func (d *Domain) Prepare(changes []items.Change, live items.Items, work workdir.Files) (*engine.Plan, error) {
 	ids, err := assignIDs(work, live)
 	if err != nil {
 		return nil, err
@@ -160,11 +165,11 @@ func (d *Domain) Prepare(_ context.Context, changes []items.Change, live items.I
 		if _, err := resolve(row, ids); err != nil {
 			return nil, fmt.Errorf("%s: %w", c.Key, err)
 		}
-		id, ok := row["id"].(json.Number)
-		if _, err := strconv.Atoi(string(id)); !ok || err != nil {
+		id, _ := row["id"].(json.Number)
+		if _, err := strconv.Atoi(string(id)); err != nil {
 			return nil, fmt.Errorf("%s: a row's id must be a whole number, or for a new row a placeholder like \"@hall_light\"", c.Key)
 		}
-		plan.Expect = append(plan.Expect, items.Change{Key: fmt.Sprintf("config/%s/%v", t.name, row["id"]), After: maps.Clone(row)})
+		plan.Expect = append(plan.Expect, items.Change{Key: key(t.name, id), After: maps.Clone(row)})
 		if c.Added {
 			row["modifiedOrNew"] = 1 // Designer's marks for new and changed rows
 		} else {

@@ -43,8 +43,8 @@ func CacheDir(designerURL string) (string, error) {
 
 func newSource(designerURL string) (*source, error) {
 	base, err := url.Parse(designerURL)
-	if err != nil {
-		return nil, err
+	if err != nil || base.Hostname() == "" {
+		return nil, fmt.Errorf("no M-SERV address in %q: set AMPIO_HOST in the environment or in .env", designerURL)
 	}
 	cache, err := CacheDir(designerURL)
 	if err != nil {

@@ -14,6 +14,7 @@ package nodered
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -72,7 +73,7 @@ func (d *Domain) Pull(ctx context.Context) (workdir.Files, error) {
 			return nil, err
 		}
 		if n := nodes[i]; n.Type == "tab" || n.Type == "subflow" {
-			name := slug(n.Label + n.Name)
+			name := slug(cmp.Or(n.Label, n.Name))
 			if name == "" || taken[name] {
 				name = strings.Trim(name+"-"+n.ID, "-")
 			}
@@ -134,7 +135,7 @@ func (*Domain) Items(files workdir.Files) (items.Items, error) {
 	return out, nil
 }
 
-func (d *Domain) Prepare(_ context.Context, changes []items.Change, _ items.Items, _ workdir.Files) (*engine.Plan, error) {
+func (d *Domain) Prepare(changes []items.Change, _ items.Items, _ workdir.Files) (*engine.Plan, error) {
 	edited := map[string]items.Change{}
 	for _, c := range changes {
 		edited[strings.TrimPrefix(c.Key, "nodered/")] = c
@@ -193,7 +194,7 @@ func (d *Domain) login(ctx context.Context) error {
 	if d.token != "" {
 		return nil
 	}
-	if err := d.settings.Check(d.settings.NodeRED); err != nil {
+	if err := mserv.Need(d.settings.NodeRED, d.settings.NodeREDPassword); err != nil {
 		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.settings.NodeRED+"/auth/login", nil)

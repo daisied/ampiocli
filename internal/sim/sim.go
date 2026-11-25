@@ -57,7 +57,7 @@ type Sim struct {
 
 // Start serves files (a working copy's tree), and Designer from designerDir,
 // on local ports. Every write is reported on log.
-func Start(files workdir.Files, designerDir string, log io.Writer) (*Sim, error) {
+func Start(files workdir.Files, designerDir string, log io.Writer) (_ *Sim, err error) {
 	s := &Sim{tables: map[string][]any{}, refuse: map[string]bool{}, log: log}
 	for _, p := range slices.Sorted(maps.Keys(files)) {
 		v, err := items.Decode(files[p])
@@ -76,6 +76,11 @@ func Start(files workdir.Files, designerDir string, log io.Writer) (*Sim, error)
 	}
 
 	s.broker = mqtt.New(&mqtt.Options{InlineClient: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	defer func() {
+		if err != nil {
+			s.broker.Close()
+		}
+	}()
 	tcp := listeners.NewTCP(listeners.Config{ID: "sim", Address: "127.0.0.1:0"})
 	if err := s.broker.AddHook(new(auth.AllowHook), nil); err != nil {
 		return nil, err
@@ -102,7 +107,6 @@ func Start(files workdir.Files, designerDir string, log io.Writer) (*Sim, error)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		s.broker.Close()
 		return nil, err
 	}
 	mux := http.NewServeMux()
@@ -224,11 +228,11 @@ func (s *Sim) getFlows(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Sim) postFlows(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	v, err2 := items.Decode(body)
+	body, _ := io.ReadAll(r.Body)
+	v, _ := items.Decode(body) // a body that fails to read or decode has no flows
 	deploy, _ := v.(map[string]any)
 	flows, ok := deploy["flows"].([]any)
-	if err != nil || err2 != nil || !ok {
+	if !ok {
 		http.Error(w, "bad deploy", http.StatusBadRequest)
 		return
 	}

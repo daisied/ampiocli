@@ -22,8 +22,8 @@ type Settings struct {
 }
 
 // LoadSettings reads the environment, after loading dir/.env for any variable
-// not already set. Offline commands work without settings; Check says whether
-// they are complete.
+// not already set. Offline commands work without settings; Need says what a
+// service is missing.
 func LoadSettings(dir string) (Settings, error) {
 	if err := loadEnvFile(filepath.Join(dir, ".env")); err != nil {
 		return Settings{}, err
@@ -47,13 +47,13 @@ func LoadSettings(dir string) (Settings, error) {
 	return s, nil
 }
 
-// Check reports what is missing to log in to the service at address, one
-// of the addresses in s.
-func (s Settings) Check(address string) error {
+// Need reports what is missing to reach a service at address, logging in
+// with password.
+func Need(address, password string) error {
 	if p, err := url.Parse(address); err != nil || p.Hostname() == "" {
 		return fmt.Errorf("no M-SERV address in %q: set AMPIO_HOST in the environment or in .env", address)
 	}
-	if s.Password == "" {
+	if password == "" {
 		return errors.New("set AMPIO_PASSWORD in the environment or in .env")
 	}
 	return nil

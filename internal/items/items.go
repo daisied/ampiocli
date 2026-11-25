@@ -34,6 +34,7 @@ func Decode(raw []byte) (any, error) {
 	return v, err
 }
 
+// Diff lists the changes from before to after, in key order.
 func Diff(before, after Items) []Change {
 	var out []Change
 	for k, b := range before {
@@ -88,7 +89,7 @@ func Equal(a, b any) bool {
 // Mismatch describes, one line per field, where actual differs from
 // expected. Only expected's fields count: the M-SERV may add fields of its
 // own, and those are not our business.
-func Mismatch(actual, expected any) []string {
+func Mismatch(expected, actual any) []string {
 	a, ok1 := actual.(map[string]any)
 	e, ok2 := expected.(map[string]any)
 	if ok1 && ok2 {

@@ -26,7 +26,7 @@ func (c *Conn) connect() error {
 		return nil
 	}
 	s := c.settings
-	if err := s.Check(s.MQTT); err != nil {
+	if err := Need(s.MQTT, s.Password); err != nil {
 		return err
 	}
 	opts := mqtt.NewClientOptions().

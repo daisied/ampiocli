@@ -6,7 +6,7 @@
 //	devices.json          CAN modules as the M-SERV lists them (reference only)
 //	config/<table>.json   app configuration tables
 //	logic/<mac>.json      decoded rules of one module
-//	nodered/<flow>.json   one Node-RED tab or subflow; global.json = config nodes
+//	nodered/<tab>.json    one Node-RED tab or subflow; global.json = config nodes
 //	blobs/<hash>.b64      long base64 values (icons, photos), referenced as "blob:<hash>"
 //	.ampiocli/base/...    the same tree as last pulled
 //	.ampiocli/backups/... the M-SERV's state just before each push
@@ -30,6 +30,9 @@ import (
 
 // Files maps a slash-separated path relative to the working copy to its JSON.
 type Files map[string]json.RawMessage
+
+// All owns every path, for reading or writing a whole tree.
+func All(string) bool { return true }
 
 // Copy is a working copy rooted at a folder.
 type Copy string
@@ -65,7 +68,7 @@ func (c Copy) Backup(files Files) (string, error) {
 		}
 		t.sub = fmt.Sprintf("%s/%s-%d", backups, name, n)
 	}
-	return t.dir(), t.Write(files, func(string) bool { return true })
+	return t.dir(), t.Write(files, All)
 }
 
 // Backups lists the backups by name, oldest first.
@@ -73,6 +76,8 @@ func (c Copy) Backups() ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(string(c), filepath.FromSlash(backups)))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
+	} else if err != nil {
+		return nil, err
 	}
 	var names []string
 	for _, e := range entries {
@@ -80,7 +85,7 @@ func (c Copy) Backups() ([]string, error) {
 			names = append(names, e.Name())
 		}
 	}
-	return names, err
+	return names, nil
 }
 
 // BackupTree returns the backup called name.
@@ -197,7 +202,7 @@ func (c Copy) extractBlobs(text []byte) ([]byte, error) {
 		sum := sha256.Sum256(data)
 		name := hex.EncodeToString(sum[:8])
 		path := filepath.Join(c.blobs(), name+".b64")
-		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 			if e := os.MkdirAll(c.blobs(), 0o755); e != nil {
 				err = e
 			} else if e := os.WriteFile(path, data, 0o644); e != nil {
@@ -212,7 +217,7 @@ func (c Copy) extractBlobs(text []byte) ([]byte, error) {
 func (c Copy) inlineBlobs(text []byte) ([]byte, error) {
 	var err error
 	out := blobRef.ReplaceAllFunc(text, func(m []byte) []byte {
-		name := string(blobRef.FindSubmatch(m)[1])
+		name := string(m[len(`"blob:`) : len(m)-1])
 		data, e := os.ReadFile(filepath.Join(c.blobs(), name+".b64"))
 		if e != nil {
 			err = fmt.Errorf("missing blob %s", name)

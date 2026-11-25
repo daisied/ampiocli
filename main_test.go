@@ -25,7 +25,7 @@ func house(t *testing.T) *sim.Sim {
 	t.Setenv("XDG_CACHE_HOME", cache)
 	t.Setenv("HOME", cache)
 
-	files, err := workdir.Copy("testdata/house").Work().Read(func(string) bool { return true })
+	files, err := workdir.Copy("testdata/house").Work().Read(workdir.All)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,9 +98,6 @@ func TestPush(t *testing.T) {
 	me.must("pull")
 	if !strings.Contains(me.read("logic/10a.json"), `"link": 3`) {
 		t.Fatalf("module 10a not decoded with its linked table:\n%s", me.read("logic/10a.json"))
-	}
-	if _, err := os.Stat(filepath.Join(me.dir, "logic/20b.json")); err == nil {
-		t.Fatal("a protocol 26 module was decoded")
 	}
 
 	edit(me, "config/objects.json", func(r *rows) {
@@ -178,8 +175,33 @@ func TestPush(t *testing.T) {
 	if strings.Contains(check.read("logic/10a.json"), `"value": 12`) || strings.Contains(check.read("nodered/lights.json"), `"n2"`) {
 		t.Error("restore did not undo the logic and flow edits")
 	}
+}
+
+// Modules from protocol 25 on store logic in a format Designer writes
+// another way; they get no logic file.
+func TestPullSkipsNewFormatModules(t *testing.T) {
+	house(t)
+	me := newCopy(t)
+	me.must("pull")
+	if _, err := os.Stat(filepath.Join(me.dir, "logic/20b.json")); err == nil {
+		t.Fatal("a protocol 26 module was decoded")
+	}
+}
+
+func TestRestoreStaysInBackups(t *testing.T) {
+	me := newCopy(t)
 	if _, err := me.run("restore", ".."); err == nil {
 		t.Error("restore accepted a path outside the backups")
+	}
+}
+
+func TestCommandLine(t *testing.T) {
+	me := newCopy(t)
+	if _, err := me.run("frobnicate", "--x"); err == nil || !strings.Contains(err.Error(), `unknown command "frobnicate"`) {
+		t.Errorf("unknown command: %v", err)
+	}
+	if _, err := me.run("diff", "--only", "config,flows"); err == nil || !strings.Contains(err.Error(), `no domain "flows"`) {
+		t.Errorf("--only with a wrong domain: %v", err)
 	}
 }
 

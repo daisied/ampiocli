@@ -64,6 +64,10 @@ func run(args []string, out io.Writer) error {
 		return errors.New("no command")
 	}
 	cmd := global.Arg(0)
+	if !slices.Contains([]string{"pull", "diff", "push", "backups", "restore", "sim"}, cmd) {
+		global.Usage()
+		return fmt.Errorf("unknown command %q", cmd)
+	}
 	flags := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	flags.Usage = global.Usage
 	var only string
@@ -115,17 +119,15 @@ func run(args []string, out io.Writer) error {
 			return errors.New("restore takes a backup name (see ampiocli backups)")
 		}
 		return e.Restore(flags.Arg(0))
-	case "sim":
+	default: // sim
 		return serve(ctx, e, settings.Designer)
 	}
-	global.Usage()
-	return fmt.Errorf("unknown command %q", cmd)
 }
 
 // serve runs the simulator until interrupted. It serves Designer from the
 // cache a pull from designerURL filled.
 func serve(ctx context.Context, e *engine.Engine, designerURL string) error {
-	files, err := e.Copy.Base().Read(func(string) bool { return true })
+	files, err := e.Copy.Base().Read(workdir.All)
 	if err != nil {
 		return err
 	}
@@ -150,14 +152,10 @@ func serve(ctx context.Context, e *engine.Engine, designerURL string) error {
 
 // pick keeps the named domains, in write order.
 func pick(domains []engine.Domain, names []string) ([]engine.Domain, error) {
-	var out []engine.Domain
-	for _, d := range domains {
-		if slices.Contains(names, d.Name()) {
-			out = append(out, d)
+	for _, n := range names {
+		if !slices.ContainsFunc(domains, func(d engine.Domain) bool { return d.Name() == n }) {
+			return nil, fmt.Errorf("--only: no domain %q (there are config, logic and nodered)", n)
 		}
 	}
-	if len(out) != len(names) {
-		return nil, fmt.Errorf("--only takes config, logic and nodered")
-	}
-	return out, nil
+	return slices.DeleteFunc(domains, func(d engine.Domain) bool { return !slices.Contains(names, d.Name()) }), nil
 }

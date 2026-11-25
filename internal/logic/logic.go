@@ -128,6 +128,9 @@ func (*Domain) Items(files workdir.Files) (items.Items, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
+		if _, ok := v.(map[string]any); !ok {
+			return nil, fmt.Errorf(`%s: expected {"name", "protocol", "rules"}`, path)
+		}
 		out[strings.TrimSuffix(path, ".json")] = v
 	}
 	return out, nil
@@ -140,7 +143,7 @@ type write struct {
 }
 
 // Prepare works on the module list of the pull the engine ran just before.
-func (d *Domain) Prepare(_ context.Context, changes []items.Change, _ items.Items, _ workdir.Files) (*engine.Plan, error) {
+func (d *Domain) Prepare(changes []items.Change, _ items.Items, _ workdir.Files) (*engine.Plan, error) {
 	var writes []write
 	for _, c := range changes {
 		if c.Added || c.Removed {
@@ -150,11 +153,9 @@ func (d *Domain) Prepare(_ context.Context, changes []items.Change, _ items.Item
 		if !items.Equal(before["name"], after["name"]) || !items.Equal(before["protocol"], after["protocol"]) {
 			return nil, fmt.Errorf("%s: only rules can change (rename modules in Designer)", c.Key)
 		}
-		dev, ok := d.devices[strings.TrimPrefix(c.Key, "logic/")]
-		if !ok {
-			return nil, fmt.Errorf("%s: no such module on the M-SERV", c.Key)
-		}
-		w, err := d.encode(dev, after["rules"])
+		// The conflict check has made sure the module is still there, and new-format
+		// modules have no logic file to change.
+		w, err := d.encode(d.devices[strings.TrimPrefix(c.Key, "logic/")], after["rules"])
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", c.Key, err)
 		}
@@ -181,9 +182,6 @@ func (d *Domain) Prepare(_ context.Context, changes []items.Change, _ items.Item
 
 // encode runs the codec checks and returns the bytes to write.
 func (d *Domain) encode(dev device, rules any) (write, error) {
-	if dev.Protocol >= newFormatProtocol {
-		return write{}, fmt.Errorf("protocol %d modules are not supported", dev.Protocol)
-	}
 	mac := dev.macUniq()
 	current, err := d.codec.Decode(mac, dev.Conditions, dev.LinkedConditions)
 	if err != nil {
