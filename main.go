@@ -91,7 +91,7 @@ func run(args []string, out io.Writer) error {
 	}
 	conn := mserv.New(settings)
 	defer conn.Close()
-	domains := []engine.Domain{config.New(conn), logic.New(conn, settings.Designer), nodered.New(settings)}
+	domains := []engine.Domain{config.New(conn), logic.New(conn, settings.Designer, out), nodered.New(settings)}
 	if only != "" {
 		if domains, err = pick(domains, strings.Split(only, ",")); err != nil {
 			return err

@@ -163,7 +163,7 @@ All over the M-SERV's MQTT broker, logged in as admin, as Designer does it.
 | Save rows | `ampio/control/admin/config/save/<table>` ← `{"List":[rows]}`, changed rows marked `modifiedOrNew: true`, new rows `1`. `group_objects`, `connected_objects` and `locations` use `save/<table>_nc`, which also takes `{"idToRemove": id}`. | `ampio/fromDB/admin/config/statusSave/<code>` → `"0"` |
 | App reload | `ampio/control/admin/data` ← `refresh` | none |
 | Module list | `device_api/to/list` | `device_api/from/list` → `{"devices":[…]}`, logic as base64 |
-| Write logic | `device_api/to/<mac>/conditions_wr` ← base64, then `linked_conditions_wr` if the linked table is not empty | `device_api/from/<mac>/status/<command>` → `{"p":100,"s":0}` |
+| Write logic | `device_api/to/<mac>/conditions_wr` ← base64, then `linked_conditions_wr` if the linked table is not empty none. ampiocli reads the module list until it shows the new bytes. |
 
 Save codes in Designer's save order: groups 2, group_objects 7, resources 4, connected_objects 1, locations 8, objects 6, flag_conditions 10, data 9.
 
@@ -176,7 +176,7 @@ Save codes in Designer's save order: groups 2, group_objects 7, resources 4, con
 - **Tested:**
   - Reading everything live, and every check up to the write, against the live M-SERV.
   - Full writes against the simulator, including a replay of the Recuperator job on a simulator seeded with the backup taken before it. The replay covered 4 groups, 17 objects, 17 group memberships, a new Node-RED tab and 2 disabled nodes. The result matched the real installation exactly, ids included.
-  - A config write on the real M-SERV: renaming a group, then undoing it with `restore`. Module logic and Node-RED writes have not been run on a real M-SERV yet.
+  - Writes on the real M-SERV, each undone with `restore`: renaming a group, changing a module rule, and adding a Node-RED node. The module list showed the new rules about a minute after each module write. The current wait for that has been run on the simulator only.
 
 ## Setup and development
 

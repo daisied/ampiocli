@@ -16,8 +16,11 @@
 // Writes go over MQTT, as Designer sends them:
 //
 //	publish base64(bytes) to device_api/to/<mac>/conditions_wr
-//	progress {"p": percent, "s": status} on device_api/from/<mac>/status/conditions_wr
 //	the same for linked_conditions_wr when the rules use linked conditions
+//
+// The M-SERV sends no answer to either (Designer doesn't wait for one), so
+// ampiocli reads the module list until it reports the new bytes. On the
+// installation it was built on, that took about a minute for 583 bytes.
 package logic
 
 import (
@@ -26,6 +29,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -46,10 +50,11 @@ type Domain struct {
 	designer string            // Designer's address, where the codec comes from
 	codec    *designer.Codec   // loaded on first pull
 	devices  map[string]device // by mac, as last pulled
+	out      io.Writer         // progress while a module write settles
 }
 
-func New(conn *mserv.Conn, designerURL string) *Domain {
-	return &Domain{conn: conn, designer: designerURL}
+func New(conn *mserv.Conn, designerURL string, out io.Writer) *Domain {
+	return &Domain{conn: conn, designer: designerURL, out: out}
 }
 
 func (*Domain) Name() string { return "logic" }
@@ -81,24 +86,16 @@ type file struct {
 }
 
 func (d *Domain) Pull(ctx context.Context) (workdir.Files, error) {
-	raw, err := d.conn.Get(ctx, "device_api/to/list", "", "device_api/from/list")
+	raw, devices, err := d.list(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("reading the module list: %w", err)
-	}
-	var list struct{ Devices json.RawMessage }
-	if err := json.Unmarshal(raw, &list); err != nil {
-		return nil, fmt.Errorf("reading the module list: %w", err)
-	}
-	var devices []device
-	if err := json.Unmarshal(list.Devices, &devices); err != nil {
-		return nil, fmt.Errorf("reading the module list: %w", err)
+		return nil, err
 	}
 	if d.codec == nil {
-		if d.codec, err = designer.Open(d.designer, list.Devices); err != nil {
+		if d.codec, err = designer.Open(d.designer, raw); err != nil {
 			return nil, err
 		}
 	}
-	files := workdir.Files{"devices.json": list.Devices}
+	files := workdir.Files{"devices.json": raw}
 	d.devices = map[string]device{}
 	for _, dev := range devices {
 		d.devices[dev.mac()] = dev
@@ -116,6 +113,23 @@ func (d *Domain) Pull(ctx context.Context) (workdir.Files, error) {
 		}
 	}
 	return files, nil
+}
+
+// list reads the module list: as the M-SERV sends it, and decoded.
+func (d *Domain) list(ctx context.Context) (json.RawMessage, []device, error) {
+	raw, err := d.conn.Get(ctx, "device_api/to/list", "", "device_api/from/list")
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading the module list: %w", err)
+	}
+	var list struct{ Devices json.RawMessage }
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, nil, fmt.Errorf("reading the module list: %w", err)
+	}
+	var devices []device
+	if err := json.Unmarshal(list.Devices, &devices); err != nil {
+		return nil, nil, fmt.Errorf("reading the module list: %w", err)
+	}
+	return list.Devices, devices, nil
 }
 
 func (*Domain) Items(files workdir.Files) (items.Items, error) {
@@ -225,19 +239,37 @@ func (d *Domain) encode(dev device, rules any) (write, error) {
 	return write{dev, conditions, linked}, nil
 }
 
-// send writes one table to a module and waits for it to confirm.
+// send writes one table to a module, then reads the module list until the
+// M-SERV reports the new bytes.
 func (d *Domain) send(ctx context.Context, dev device, command string, data []byte) error {
 	topic := fmt.Sprintf("device_api/to/%s/%s", dev.mac(), command)
-	status := fmt.Sprintf("device_api/from/%s/status/%s", dev.mac(), command)
-	payload := []byte(base64.StdEncoding.EncodeToString(data))
-	return d.conn.Call(ctx, topic, payload, status, time.Minute, func(reply []byte) (bool, error) {
-		var s struct{ P, S int }
-		if err := json.Unmarshal(reply, &s); err != nil {
-			return false, fmt.Errorf("module %s: unreadable status %q", dev.mac(), reply)
+	if err := d.conn.Publish(topic, base64.StdEncoding.EncodeToString(data)); err != nil {
+		return err
+	}
+	// A module stores a table without the 255 end mark the encoder appends.
+	want := bytes.TrimSuffix(data, []byte{255})
+	timeout := 2*time.Minute + time.Duration(len(data))*200*time.Millisecond
+	fmt.Fprintf(d.out, "logic: %s sent to module %s (%d bytes), waiting for the module list to show it (about a minute)\n", command, dev.mac(), len(data))
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		_, devices, err := d.list(ctx)
+		if err != nil {
+			return err
 		}
-		if s.S < 0 {
-			return false, fmt.Errorf("module %s refused %s (status %d)", dev.mac(), command, s.S)
+		for _, now := range devices {
+			got := now.Conditions
+			if command == "linked_conditions_wr" {
+				got = now.LinkedConditions
+			}
+			if now.MacProd == dev.MacProd && bytes.Equal(got, want) {
+				return nil
+			}
 		}
-		return s.P >= 100 && s.S == 0, nil
-	})
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("module %s: %s sent, but the module list still shows the old bytes after %s", dev.mac(), command, timeout)
+		case <-time.After(2 * time.Second):
+		}
+	}
 }

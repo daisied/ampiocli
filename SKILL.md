@@ -74,6 +74,6 @@ ampiocli push --yes           # backup, write, read back, verify
 | `… nothing written` | A check refused before any write. Fix the edit. |
 | `the M-SERV refused the … save`, `no answer on …` | The push stopped part-way. Tell the person. Once they say go, run `push --yes` again: it skips what was already written. |
 | `written, but … reads back differently` / `… is missing` | The M-SERV took the write but stored something else. Stop, and show the person the message and the backup folder. |
-| a module status error | The module refused the write. Stop, and tell the person. |
+| `… the module list still shows the old bytes` | The module didn't take the rules. Stop, and tell the person. |
 
 To undo a push, run `ampiocli backups`, then `ampiocli restore <name>`. Show the `ampiocli push` dry run to the person, then run `push --yes` once they say go. A restore can't delete rows the push created in non-removable tables. Hide those with the DELETED bit instead.

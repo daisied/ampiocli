@@ -218,7 +218,7 @@ func (s *Sim) writeModule(topic string, payload []byte) {
 		}
 	}
 	s.mu.Unlock()
-	s.publishJSON(fmt.Sprintf("device_api/from/%s/status/%s", mac, command), map[string]int{"p": 100, "s": 0})
+	// Like the real M-SERV, no answer.
 }
 
 func (s *Sim) getFlows(w http.ResponseWriter, _ *http.Request) {
