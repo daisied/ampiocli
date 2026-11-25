@@ -49,7 +49,7 @@ ampiocli push --yes           # backup, write, read back, verify
 ### Config rows
 
 - To change a row, edit fields in place.
-- To add a row, copy a similar row and give it a placeholder id, `"id": "@kitchen_spot"`. Use the same placeholder in the id column of any other new or changed row that must point at it (`id_obiektu`, `id_grupy`, `id_rodzica`, `lokalizacja`, ...; for example `"id_obiektu": "@kitchen_spot"` in `group_objects.json`). Push turns it into the next free id.
+- To add a row, copy a similar row and give it a placeholder id of its own, `"id": "@kitchen_spot"`. Use the same placeholder in the id column of any other new or changed row that must point at it (`id_obiektu`, `id_grupy`, `id_rodzica`, `lokalizacja`, ...; for example `"id_obiektu": "@kitchen_spot"` in `group_objects.json`). Push turns it into the next free id.
 - Rows in `objects`, `groups`, `resources`, `flag_conditions` and `data` cannot be deleted. To hide an object or group, set bit 16 in `params` (`params | 16`). Rows in `group_objects`, `connected_objects` and `locations` can be removed by deleting them from the file.
 - `conditions` and `scenes` are read-only.
 
