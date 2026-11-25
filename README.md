@@ -176,7 +176,7 @@ Save codes in Designer's save order: groups 2, group_objects 7, resources 4, con
 - **Tested:**
   - Reading everything live, and every check up to the write, against the live M-SERV.
   - Full writes against the simulator, including a replay of the Recuperator job on a simulator seeded with the backup taken before it. The replay covered 4 groups, 17 objects, 17 group memberships, a new Node-RED tab and 2 disabled nodes. The result matched the real installation exactly, ids included.
-  - Writes to a real M-SERV are not tested yet.
+  - A config write on the real M-SERV: renaming a group, then undoing it with `restore`. Module logic and Node-RED writes have not been run on a real M-SERV yet.
 
 ## Setup and development
 
