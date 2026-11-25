@@ -1,5 +1,7 @@
 # ampiocli
 
+**EN** · [PL](README.pl.md)
+
 Change an Ampio installation without opening Designer. ampiocli reads the M-SERV into plain files and writes your edits back, so you can:
 
 - **Edit the app.** Add, rename, regroup or hide objects and groups.
@@ -163,7 +165,7 @@ All over the M-SERV's MQTT broker, logged in as admin, as Designer does it.
 | Save rows | `ampio/control/admin/config/save/<table>` ← `{"List":[rows]}`, changed rows marked `modifiedOrNew: true`, new rows `1`. `group_objects`, `connected_objects` and `locations` use `save/<table>_nc`, which also takes `{"idToRemove": id}`. | `ampio/fromDB/admin/config/statusSave/<code>` → `"0"` |
 | App reload | `ampio/control/admin/data` ← `refresh` | none |
 | Module list | `device_api/to/list` | `device_api/from/list` → `{"devices":[…]}`, logic as base64 |
-| Write logic | `device_api/to/<mac>/conditions_wr` ← base64, then `linked_conditions_wr` if the linked table is not empty `device_api/from/<MAC>/status/<command>/0` → `{"p":100,"s":0}`, mac in upper case |
+| Write logic | `device_api/to/<mac>/conditions_wr` ← base64, then `linked_conditions_wr` if the linked table is not empty | `device_api/from/<MAC>/status/<command>/0` → `{"p":100,"s":0}`, mac in upper case |
 
 Save codes in Designer's save order: groups 2, group_objects 7, resources 4, connected_objects 1, locations 8, objects 6, flag_conditions 10, data 9.
 
