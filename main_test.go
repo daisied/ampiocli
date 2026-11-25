@@ -107,7 +107,8 @@ func TestPush(t *testing.T) {
 		(*r)[0]["opis_menu"] = "Hall lights"
 		*r = append(*r,
 			map[string]any{"id": 3, "opis_menu": "Fan", "params": 0},
-			map[string]any{"id": "@lamp", "opis_menu": "Lamp", "params": 0, "uwagi": "@home"})
+			map[string]any{"id": "@lamp", "opis_menu": "Lamp", "params": 0, "uwagi": "@home"},
+			map[string]any{"id": "@desk", "opis_menu": "Desk", "params": 0})
 	})
 	edit(me, "config/group_objects.json", func(r *rows) {
 		*r = append(*r, map[string]any{"id": "@member", "id_grupy": 1, "id_obiektu": "@lamp"})
@@ -140,9 +141,20 @@ func TestPush(t *testing.T) {
 	}
 	check.must("pull")
 	objects, members := check.read("config/objects.json"), check.read("config/group_objects.json")
-	// @lamp comes after the Fan, numbered 3 by hand; "@home" is a label, not a reference.
-	if !strings.Contains(objects, `"id": 4,`) || !strings.Contains(members, `"id_obiektu": 4`) || !strings.Contains(objects, `"uwagi": "@home"`) {
+	var stored rows
+	if err := json.Unmarshal([]byte(objects), &stored); err != nil {
+		t.Fatal(err)
+	}
+	id := map[any]any{}
+	for _, r := range stored {
+		id[r["opis_menu"]] = r["id"]
+	}
+	// New rows are numbered in file order, after the Fan, numbered 3 by hand.
+	if id["Lamp"] != 4.0 || id["Desk"] != 5.0 || !strings.Contains(members, `"id_obiektu": 4`) {
 		t.Errorf("placeholders not resolved:\n%s\n%s", objects, members)
+	}
+	if !strings.Contains(objects, `"uwagi": "@home"`) {
+		t.Error("a placeholder outside the id columns was resolved")
 	}
 	if strings.Contains(objects, "modifiedOrNew") {
 		t.Error("modifiedOrNew reached the stored rows")
@@ -247,6 +259,10 @@ func TestPushRefuses(t *testing.T) {
 
 	edit(me, "config/objects.json", func(r *rows) { *r = (*r)[1:] })
 	refuse("cannot be deleted")
+
+	edit(me, "config/objects.json", func(r *rows) { *r = append(*r, map[string]any{"id": "@hall", "params": 0}) })
+	edit(me, "config/groups.json", func(r *rows) { *r = append(*r, map[string]any{"id": "@hall", "params": 0}) })
+	refuse("@hall is the id of two new rows")
 
 	edit(me, "devices.json", func(r *rows) { (*r)[0]["protocol"] = 24 })
 	if out := me.must("push", "--yes"); out != "nothing to push\n" {

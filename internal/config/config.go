@@ -137,7 +137,10 @@ func split(key string) (table, string) {
 }
 
 func (d *Domain) Prepare(_ context.Context, changes []items.Change, live items.Items, work workdir.Files) (*engine.Plan, error) {
-	ids := assignIDs(changes, live)
+	ids, err := assignIDs(work, live)
+	if err != nil {
+		return nil, err
+	}
 	saves := map[string][]any{} // table → rows and removals to send
 	plan := &engine.Plan{}
 	for _, c := range changes {
@@ -171,7 +174,6 @@ func (d *Domain) Prepare(_ context.Context, changes []items.Change, live items.I
 	}
 
 	if len(ids) > 0 {
-		var err error
 		if plan.Work, err = resolveFiles(work, ids); err != nil {
 			return nil, err
 		}
@@ -190,30 +192,50 @@ func (d *Domain) Prepare(_ context.Context, changes []items.Change, live items.I
 	return plan, nil
 }
 
-// assignIDs gives every placeholder id of a new row the next free id of its
-// table, after the live rows and the new rows numbered by hand.
-func assignIDs(changes []items.Change, live items.Items) map[string]json.Number {
+// assignIDs numbers the new rows that have a placeholder id in the order
+// they appear in their file, after the table's live rows and the new rows
+// numbered by hand.
+func assignIDs(work workdir.Files, live items.Items) (map[string]json.Number, error) {
 	highest := map[string]int{}
-	count := func(key string) {
+	for key := range live {
 		t, id := split(key)
 		if n, err := strconv.Atoi(id); err == nil {
 			highest[t.name] = max(highest[t.name], n)
 		}
 	}
-	for key := range live {
-		count(key)
-	}
-	for _, c := range changes {
-		count(c.Key)
-	}
 	ids := map[string]json.Number{}
-	for _, c := range changes {
-		if t, id := split(c.Key); c.Added && placeholder.MatchString(id) {
+	for _, t := range tables {
+		raw, ok := work["config/"+t.name+".json"]
+		if !ok {
+			continue
+		}
+		v, err := items.Decode(raw)
+		if err != nil {
+			return nil, err
+		}
+		rows, _ := v.([]any)
+		var news []string
+		for _, r := range rows {
+			switch id := r.(map[string]any)["id"].(type) {
+			case json.Number:
+				if n, err := strconv.Atoi(string(id)); err == nil {
+					highest[t.name] = max(highest[t.name], n)
+				}
+			case string:
+				if placeholder.MatchString(id) {
+					news = append(news, id)
+				}
+			}
+		}
+		for _, id := range news {
+			if _, dup := ids[id]; dup {
+				return nil, fmt.Errorf("%s is the id of two new rows; give each its own placeholder", id)
+			}
 			highest[t.name]++
 			ids[id] = json.Number(strconv.Itoa(highest[t.name]))
 		}
 	}
-	return ids
+	return ids, nil
 }
 
 // resolve replaces the placeholders in a row's id columns with their ids,
