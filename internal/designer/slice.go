@@ -56,10 +56,11 @@ func parseChunk(file string, src []byte) (*chunk, error) {
 		c.top[v] = true
 	}
 	pos := 0
-	add := func(name []byte, node js.INode) {
-		c.parts[string(name)] = append(c.parts[string(name)], part{pos, node})
+	next := func(node js.INode) part {
 		pos++
+		return part{pos, node}
 	}
+	add := func(name string, p part) { c.parts[name] = append(c.parts[name], p) }
 	for _, st := range ast.BlockStmt.List {
 		switch s := st.(type) {
 		case *js.ImportStmt:
@@ -72,27 +73,23 @@ func parseChunk(file string, src []byte) (*chunk, error) {
 			}
 		case *js.VarDecl:
 			for i := range s.List {
-				decl := &s.List[i]
-				bound(decl.Binding, func(v *js.Var) { add(v.Data, decl) })
+				p := next(&s.List[i]) // one part, however many names it binds
+				bound(s.List[i].Binding, func(v *js.Var) { add(string(v.Data), p) })
 			}
 		case *js.FuncDecl:
 			if s.Name != nil {
-				add(s.Name.Data, s)
+				add(string(s.Name.Data), next(s))
 			}
 		case *js.ClassDecl:
 			if s.Name != nil {
-				add(s.Name.Data, s)
+				add(string(s.Name.Data), next(s))
 			}
-		case *js.ExprStmt:
-			if name := windowInstall(s); name != nil {
-				add(name, s)
-				continue
-			}
-			c.other = append(c.other, part{pos, s})
-			pos++
 		default:
-			c.other = append(c.other, part{pos, s})
-			pos++
+			if name := windowInstall(s); name != "" {
+				add(name, next(s))
+			} else {
+				c.other = append(c.other, next(s))
+			}
 		}
 	}
 	return c, nil
@@ -119,22 +116,43 @@ func bound(b js.IBinding, f func(*js.Var)) {
 	}
 }
 
-// windowInstall returns X for a statement `window.X = ...`.
-func windowInstall(s *js.ExprStmt) []byte {
-	assign, ok := s.Value.(*js.BinaryExpr)
-	if !ok || assign.Op != js.EqToken {
-		return nil
+// windowInstall returns X for a statement `window.X = ...`, or "".
+func windowInstall(s js.IStmt) string {
+	if e, ok := s.(*js.ExprStmt); ok {
+		if assign, ok := e.Value.(*js.BinaryExpr); ok && assign.Op == js.EqToken {
+			return windowProp(assign.X)
+		}
 	}
-	dot, ok := assign.X.(*js.DotExpr)
-	if !ok {
-		return nil
+	return ""
+}
+
+// windowProp returns X for an expression window.X, or "".
+func windowProp(e js.IExpr) string {
+	if dot, ok := e.(*js.DotExpr); ok && global(dot.X, "window") {
+		return prop(dot)
 	}
-	obj, ok := dot.X.(*js.Var)
-	prop, isName := dot.Y.(js.LiteralExpr)
-	if !ok || !isName || string(obj.Data) != "window" || obj.Decl != js.NoDecl {
-		return nil
+	return ""
+}
+
+// global reports whether e is the global variable name, not a local that
+// shares it.
+func global(e js.IExpr, name string) bool {
+	v, ok := e.(*js.Var)
+	return ok && v.Decl == js.NoDecl && string(v.Data) == name
+}
+
+// prop returns the property name of x.name, or "" for a computed one.
+func prop(dot *js.DotExpr) string {
+	name, _ := dot.Y.(js.LiteralExpr)
+	return string(name.Data)
+}
+
+// origin follows a variable to the declaration it refers to.
+func origin(v *js.Var) *js.Var {
+	for v.Link != nil {
+		v = v.Link
 	}
-	return prop.Data
+	return v
 }
 
 // uses lists the top-level names n refers to: the chunk's own declarations,
@@ -146,16 +164,11 @@ func (c *chunk) uses(n js.INode) []string {
 	walk(n, func(n js.INode) bool {
 		switch n := n.(type) {
 		case *js.DotExpr:
-			if obj, ok := n.X.(*js.Var); ok && string(obj.Data) == "window" && obj.Decl == js.NoDecl {
-				if prop, ok := n.Y.(js.LiteralExpr); ok && c.parts[string(prop.Data)] != nil {
-					names = append(names, string(prop.Data))
-				}
+			if name := windowProp(n); c.parts[name] != nil {
+				names = append(names, name)
 			}
 		case *js.Var:
-			v := n
-			for v.Link != nil {
-				v = v.Link
-			}
+			v := origin(n)
 			name := string(v.Data)
 			_, isImport := c.imports[name]
 			if c.top[v] || v.Decl == js.NoDecl && (isImport || c.parts[name] != nil) {
@@ -167,23 +180,30 @@ func (c *chunk) uses(n js.INode) []string {
 	return names
 }
 
-// slice returns the parts the named roots reach, in chunk order, and the
-// local names of the imports they use.
+// slice returns the parts the chunk's exports (exported name → local name)
+// reach, in chunk order, and the local names of the imports they use.
 //
 // Other top-level code is kept when it changes something kept, as library
 // set-up does (Long.fromInt = ..., X.prototype.f = ...), since the browser
 // would have run it. The rest (rendering, event wiring, loading React) only
 // reads what is kept and is left out.
-func (c *chunk) slice(roots []string) (parts []part, imports []string) {
-	seen := map[string]bool{}
+func (c *chunk) slice(exports map[string]string) (parts []part, imports []string, err error) {
+	roots := slices.Sorted(maps.Values(exports))
+	for _, name := range roots {
+		if c.parts[name] == nil {
+			return nil, nil, fmt.Errorf("Designer changed: %s has no top-level %s", c.file, name)
+		}
+	}
+	seen, kept := map[string]bool{}, map[int]bool{}
 	keep := func(p part) []string {
-		if slices.Contains(parts, p) { // a destructuring declarator binds several names
+		if kept[p.pos] {
 			return nil
 		}
+		kept[p.pos] = true
 		parts = append(parts, p)
 		return c.uses(p.node)
 	}
-	for queue := slices.Clone(roots); len(queue) > 0; {
+	for queue := roots; len(queue) > 0; {
 		for len(queue) > 0 {
 			name := queue[len(queue)-1]
 			queue = queue[:len(queue)-1]
@@ -207,7 +227,7 @@ func (c *chunk) slice(roots []string) (parts []part, imports []string) {
 	}
 	slices.SortFunc(parts, func(a, b part) int { return a.pos - b.pos })
 	slices.Sort(imports)
-	return parts, imports
+	return parts, imports, nil
 }
 
 var assignment = map[js.TokenType]bool{
@@ -224,24 +244,17 @@ var objectSetters = map[string]bool{"defineProperty": true, "defineProperties": 
 // (X = ..., X.a.b = ..., X[k] += ...), or sets properties on it with
 // Object.defineProperty and the like.
 func (c *chunk) changes(n js.INode, names map[string]bool) bool {
-	found := false
-	walk(n, func(n js.INode) bool {
+	return find(n, func(n js.INode) bool {
 		switch n := n.(type) {
 		case *js.BinaryExpr:
-			found = assignment[n.Op] && names[c.root(n.X)]
+			return assignment[n.Op] && names[c.root(n.X)]
 		case *js.CallExpr:
 			dot, ok := n.X.(*js.DotExpr)
-			if !ok || len(n.Args.List) == 0 {
-				break
-			}
-			obj, isVar := dot.X.(*js.Var)
-			prop, isName := dot.Y.(js.LiteralExpr)
-			found = isVar && string(obj.Data) == "Object" && obj.Decl == js.NoDecl && isName &&
-				objectSetters[string(prop.Data)] && names[c.root(n.Args.List[0].Value)]
+			return ok && global(dot.X, "Object") && objectSetters[prop(dot)] &&
+				len(n.Args.List) > 0 && names[c.root(n.Args.List[0].Value)]
 		}
-		return !found
+		return false
 	})
-	return found
 }
 
 // root returns the top-level name an expression such as X, X.a.b or X[k]
@@ -277,6 +290,8 @@ type program struct {
 	order   []string // chunks in the order they were reached
 }
 
+func newProgram(src *source) *program { return &program{src: src, chunks: map[string]*chunk{}} }
+
 func (p *program) chunk(file string) (*chunk, error) {
 	if c, ok := p.chunks[file]; ok {
 		return c, nil
@@ -293,7 +308,8 @@ func (p *program) chunk(file string) (*chunk, error) {
 	return c, nil
 }
 
-// build returns the program for the names entry exports.
+// build returns the program, a JavaScript function expression, for the
+// names entry exports.
 func (p *program) build(entry *chunk, names map[string]string) (string, error) {
 	p.exports = map[string]map[string]string{entry.file: names}
 	p.order = []string{entry.file}
@@ -301,7 +317,7 @@ func (p *program) build(entry *chunk, names map[string]string) (string, error) {
 	// grow as more is asked of them: repeat until nothing changes.
 	for queue := []string{entry.file}; len(queue) > 0; queue = queue[1:] {
 		c := p.chunks[queue[0]]
-		_, imports, err := p.slice(c)
+		_, imports, err := c.slice(p.exports[c.file])
 		if err != nil {
 			return "", err
 		}
@@ -330,32 +346,20 @@ func (p *program) build(entry *chunk, names map[string]string) (string, error) {
 	}
 
 	var w strings.Builder
-	w.WriteString("() => {\nvar __ampiocli = {};\n")
+	w.WriteString("(() => {\nvar __ampiocli = {};\n")
 	for _, file := range p.order {
 		if err := p.module(&w, p.chunks[file]); err != nil {
 			return "", err
 		}
 	}
-	fmt.Fprintf(&w, "return __ampiocli[%q]();\n}", entry.file)
+	fmt.Fprintf(&w, "return __ampiocli[%q]();\n})", entry.file)
 	return w.String(), nil
-}
-
-// slice slices c for the names asked of it.
-func (p *program) slice(c *chunk) ([]part, []string, error) {
-	roots := slices.Sorted(maps.Values(p.exports[c.file]))
-	for _, name := range roots {
-		if c.parts[name] == nil {
-			return nil, nil, fmt.Errorf("Designer changed: %s has no top-level %s", c.file, name)
-		}
-	}
-	parts, imports := c.slice(roots)
-	return parts, imports, nil
 }
 
 // module writes the module function of one chunk. Chunk code is module
 // code, so it runs in strict mode.
 func (p *program) module(w *strings.Builder, c *chunk) error {
-	parts, imports, err := p.slice(c)
+	parts, imports, err := c.slice(p.exports[c.file])
 	if err != nil {
 		return err
 	}
@@ -419,7 +423,7 @@ func (c *chunk) codecNames() (map[string]string, error) {
 			return true
 		}
 		encode, decode := c.calledName(first.List[0].Default), c.calledName(last.Value)
-		var registry string
+		var registry string // the receiver of REGISTRY.updateConditionsArrByMacUniq(...)
 		contains(body, func(call *js.CallExpr) bool {
 			registry = c.topName(method(call, "updateConditionsArrByMacUniq"))
 			return registry != ""
@@ -482,17 +486,10 @@ func (c *chunk) onlyFunction(what string, params int, match func(*js.BlockStmt) 
 
 // topName returns the name of e if it is a top-level variable of the chunk.
 func (c *chunk) topName(e js.IExpr) string {
-	v, ok := e.(*js.Var)
-	if !ok {
-		return ""
+	if v, ok := e.(*js.Var); ok && c.top[origin(v)] {
+		return string(v.Data)
 	}
-	for v.Link != nil {
-		v = v.Link
-	}
-	if !c.top[v] {
-		return ""
-	}
-	return string(v.Data)
+	return ""
 }
 
 // calledName returns NAME for a call NAME(...) of a top-level function.
@@ -505,10 +502,8 @@ func (c *chunk) calledName(e js.IExpr) string {
 
 // method returns the receiver of a call receiver.name(...), or nil.
 func method(call *js.CallExpr, name string) js.IExpr {
-	if dot, ok := call.X.(*js.DotExpr); ok {
-		if prop, ok := dot.Y.(js.LiteralExpr); ok && string(prop.Data) == name {
-			return dot.X
-		}
+	if dot, ok := call.X.(*js.DotExpr); ok && prop(dot) == name {
+		return dot.X
 	}
 	return nil
 }
@@ -526,28 +521,30 @@ func function(n js.INode) (*js.Params, *js.BlockStmt, bool) {
 	return nil, nil, false
 }
 
-// contains reports whether n holds a call that match accepts.
-func contains(n js.INode, match func(*js.CallExpr) bool) bool {
+// find reports whether n holds a node that match accepts.
+func find(n js.INode, match func(js.INode) bool) bool {
 	found := false
 	walk(n, func(n js.INode) bool {
-		if call, ok := n.(*js.CallExpr); ok && !found && match(call) {
-			found = true
-		}
+		found = found || match(n)
 		return !found
 	})
 	return found
 }
 
+// contains reports whether n holds a call that match accepts.
+func contains(n js.INode, match func(*js.CallExpr) bool) bool {
+	return find(n, func(n js.INode) bool {
+		call, ok := n.(*js.CallExpr)
+		return ok && match(call)
+	})
+}
+
 // assigns reports whether n holds an assignment `target = value` that match accepts.
 func assigns(n js.INode, match func(target, value js.IExpr) bool) bool {
-	found := false
-	walk(n, func(n js.INode) bool {
-		if b, ok := n.(*js.BinaryExpr); ok && !found && b.Op == js.EqToken && match(b.X, b.Y) {
-			found = true
-		}
-		return !found
+	return find(n, func(n js.INode) bool {
+		b, ok := n.(*js.BinaryExpr)
+		return ok && b.Op == js.EqToken && match(b.X, b.Y)
 	})
-	return found
 }
 
 // walk visits n and its descendants depth-first while visit returns true.

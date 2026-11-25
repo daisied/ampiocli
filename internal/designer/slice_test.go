@@ -23,7 +23,7 @@ func miniature(t *testing.T) (*program, *chunk) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &program{src: src, chunks: map[string]*chunk{}}
+	p := newProgram(src)
 	c, err := p.chunk(file)
 	if err != nil {
 		t.Fatal(err)
@@ -60,10 +60,13 @@ func TestProgramKeepsOnlyTheCodec(t *testing.T) {
 			t.Errorf("program contains %s:\n%s", gone, js)
 		}
 	}
-	for _, kept := range []string{"var De = importShared;", `"use strict"`, "window.macPrefix", `var {"h": Hx, "r": Rm} = await`, "class Rg", "Rg.prototype.size = function", `var Pre = "0";`, `var Pre = Pre + "_";`} {
+	for _, kept := range []string{"var De = importShared;", `"use strict"`, "window.macPrefix", `var {"h": Hx, "r": Rm} = await`, "class Rg", "Rg.prototype.size = function", "Ux = 1", "var Ux", `var Pre = "0";`, `var Pre = Pre + "_";`} {
 		if !strings.Contains(js, kept) {
 			t.Errorf("program lacks %s:\n%s", kept, js)
 		}
+	}
+	if n := strings.Count(js, "var [Lo, Hi]"); n != 1 {
+		t.Errorf("a declarator binding two names is in the program %d times:\n%s", n, js)
 	}
 	// names-T5.js is imported by two chunks, and must run once, like an ES module.
 	if n := strings.Count(js, `__ampiocli["/assets/names-T5.js"] = `); n != 1 {

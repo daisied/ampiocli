@@ -39,7 +39,7 @@ func Open(designerURL string, devices json.RawMessage) (*Codec, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &program{src: src, chunks: map[string]*chunk{}}
+	p := newProgram(src)
 	entry, err := p.chunk(file)
 	if err != nil {
 		return nil, err
@@ -54,17 +54,17 @@ func Open(designerURL string, devices json.RawMessage) (*Codec, error) {
 	}
 
 	c := &Codec{Version: path.Base(file), vm: goja.New()}
-	if err := c.start("("+code+")", devices); err != nil {
+	if err := c.start(code, devices); err != nil {
 		return nil, fmt.Errorf("starting Designer %s codec: %w", c.Version, err)
 	}
 	return c, nil
 }
 
-func (c *Codec) start(program string, devices json.RawMessage) error {
+func (c *Codec) start(js string, devices json.RawMessage) error {
 	if _, err := c.vm.RunString(runtimeJS); err != nil {
 		return err
 	}
-	fn, err := c.vm.RunString(program)
+	fn, err := c.vm.RunString(js)
 	if err != nil {
 		return err
 	}
