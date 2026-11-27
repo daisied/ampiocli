@@ -86,18 +86,24 @@ func Equal(a, b any) bool {
 	}
 }
 
-// Mismatch describes, one line per field, where actual differs from
-// expected. Only expected's fields count: the M-SERV may add fields of its
-// own, and those are not our business.
-func Mismatch(expected, actual any) []string {
+// Mismatch describes, one line per field, where actual differs from the
+// edit c.After. Fields the M-SERV adds of its own are not our business, so
+// actual's fields count only if the edit has them or removed them (they were
+// in c.Before).
+func Mismatch(c Change, actual any) []string {
 	a, ok1 := actual.(map[string]any)
-	e, ok2 := expected.(map[string]any)
+	e, ok2 := c.After.(map[string]any)
 	if ok1 && ok2 {
+		b, _ := c.Before.(map[string]any)
 		a = maps.Clone(a)
-		maps.DeleteFunc(a, func(k string, _ any) bool { _, ok := e[k]; return !ok })
+		maps.DeleteFunc(a, func(k string, _ any) bool {
+			_, edited := e[k]
+			_, removed := b[k]
+			return !edited && !removed
+		})
 		actual = a
 	}
-	return Fields(expected, actual)
+	return Fields(c.After, actual)
 }
 
 // Describe renders a change as a header line and one line per changed field.

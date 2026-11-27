@@ -55,11 +55,21 @@ func TestDiffAndDescribe(t *testing.T) {
 
 func TestMismatchIgnoresExtraFields(t *testing.T) {
 	actual := decode(t, `{"id":1,"name":"a","stamp":5}`)
-	if m := Mismatch(decode(t, `{"id":1,"name":"a"}`), actual); m != nil {
+	if m := Mismatch(Change{After: decode(t, `{"id":1,"name":"a"}`)}, actual); m != nil {
 		t.Errorf("extra field counted: %q", m)
 	}
-	if m := Mismatch(decode(t, `{"id":1,"name":"b"}`), actual); !slices.Equal(m, []string{`name: "b" → "a"`}) {
+	if m := Mismatch(Change{After: decode(t, `{"id":1,"name":"b"}`)}, actual); !slices.Equal(m, []string{`name: "b" → "a"`}) {
 		t.Errorf("got %q", m)
+	}
+}
+
+func TestMismatchCountsRemovedFields(t *testing.T) {
+	c := Change{Before: decode(t, `{"id":1,"d":true}`), After: decode(t, `{"id":1}`)}
+	if m := Mismatch(c, decode(t, `{"id":1,"d":true}`)); len(m) != 1 {
+		t.Errorf("removed field still there, got %q", m)
+	}
+	if m := Mismatch(c, decode(t, `{"id":1,"stamp":5}`)); m != nil {
+		t.Errorf("removed field gone, got %q", m)
 	}
 }
 

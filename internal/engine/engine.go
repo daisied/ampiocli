@@ -308,7 +308,7 @@ func (e *Engine) apply(ctx context.Context, d Domain, plan *Plan) error {
 		case !ok:
 			return fmt.Errorf("written, but %s is missing", c.Key)
 		default:
-			return fmt.Errorf("written, but %s reads back differently:\n  %s", c.Key, strings.Join(items.Mismatch(c.After, got), "\n  "))
+			return fmt.Errorf("written, but %s reads back differently:\n  %s", c.Key, strings.Join(items.Mismatch(c, got), "\n  "))
 		}
 	}
 	if err := e.save(d, files); err != nil {
@@ -345,7 +345,7 @@ func applied(c items.Change, live any, ok bool) bool {
 	if c.Removed {
 		return !ok
 	}
-	return ok && len(items.Mismatch(c.After, live)) == 0
+	return ok && len(items.Mismatch(c, live)) == 0
 }
 
 // Restore puts a backup's files into the working copy, so that the next
